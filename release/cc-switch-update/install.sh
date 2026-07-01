@@ -83,6 +83,19 @@ PY
     return
   fi
 
+  if command -v ruby >/dev/null 2>&1; then
+    ruby -rjson -e '
+      value = JSON.parse(File.read(ARGV[0]))
+      ARGV[1].split(".").each do |part|
+        exit 1 unless value.is_a?(Hash) && value.key?(part)
+        value = value[part]
+      end
+      exit 1 if value.nil?
+      puts value
+    ' "$file" "$path"
+    return
+  fi
+
   if [[ -x /usr/bin/plutil ]]; then
     /usr/bin/plutil -extract "$path" raw -o - "$file" 2>/dev/null
     return
@@ -100,7 +113,10 @@ resolve_from_metadata() {
 
   source="$(metadata_url)"
   say "正在读取 GitHub 版本信息：${source}"
-  curl -fsSL --retry 3 --connect-timeout 20 -o "$metadata" "$source" \
+  curl -fsSL --retry 3 --connect-timeout 20 \
+    -H "Cache-Control: no-cache" \
+    -H "Pragma: no-cache" \
+    -o "$metadata" "${source}?cache_bust=$(date +%s)" \
     || fail "无法读取 GitHub Release 版本信息"
 
   url="$(json_get "$metadata" "installers.darwin-${arch}.url" 2>/dev/null || true)"
@@ -108,6 +124,15 @@ resolve_from_metadata() {
 
   if [[ -z "$url" ]]; then
     url="$(json_get "$metadata" "platforms.darwin-${arch}.url" 2>/dev/null || true)"
+  fi
+
+  if [[ -z "$url" && "$arch" == "x86_64" ]]; then
+    say "没有找到 darwin-x86_64 独立条目，尝试使用 macOS Universal 包..."
+    url="$(json_get "$metadata" "installers.darwin-aarch64.url" 2>/dev/null || true)"
+    sha="$(json_get "$metadata" "installers.darwin-aarch64.sha256" 2>/dev/null || true)"
+    if [[ -z "$url" ]]; then
+      url="$(json_get "$metadata" "platforms.darwin-aarch64.url" 2>/dev/null || true)"
+    fi
   fi
 
   [[ -n "$url" ]] || fail "latest-company.json 中没有 darwin-${arch} 安装包"
