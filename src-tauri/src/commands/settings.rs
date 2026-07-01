@@ -517,6 +517,9 @@ mod tests {
                     completed_at: "2026-05-20T00:01:00Z".to_string(),
                     migrated_provider_ids: vec!["legacy".to_string()],
                 }),
+                codex_unified_session_history_default_enabled_v1: true,
+                codex_unified_existing_history_default_migrate_v1: true,
+                codex_preserve_official_auth_default_enabled_v1: true,
                 codex_official_history_unify_v1: Some(CodexOfficialHistoryUnifyMigration {
                     completed_at: "2026-06-12T00:00:00Z".to_string(),
                     target_provider_id: "custom".to_string(),
@@ -570,6 +573,9 @@ mod tests {
             local_migrations: Some(LocalMigrations {
                 codex_third_party_history_provider_bucket_v1: None,
                 codex_provider_template_v1: None,
+                codex_unified_session_history_default_enabled_v1: true,
+                codex_unified_existing_history_default_migrate_v1: true,
+                codex_preserve_official_auth_default_enabled_v1: true,
                 codex_official_history_unify_v1: Some(CodexOfficialHistoryUnifyMigration {
                     completed_at: "2026-06-12T00:00:00Z".to_string(),
                     target_provider_id: "custom".to_string(),

@@ -55,6 +55,8 @@ vi.mock("@/lib/query", () => ({
 
 const providersApiUpdateMock = vi.fn();
 const providersApiUpdateTrayMenuMock = vi.fn();
+const providersApiOpenTerminalMock = vi.fn();
+const providersApiOpenCodexAppMock = vi.fn();
 const settingsApiGetMock = vi.fn();
 const settingsApiApplyMock = vi.fn();
 const openclawApiGetModelCatalogMock = vi.fn();
@@ -66,6 +68,8 @@ vi.mock("@/lib/api", () => ({
     update: (...args: unknown[]) => providersApiUpdateMock(...args),
     updateTrayMenu: (...args: unknown[]) =>
       providersApiUpdateTrayMenuMock(...args),
+    openTerminal: (...args: unknown[]) => providersApiOpenTerminalMock(...args),
+    openCodexApp: (...args: unknown[]) => providersApiOpenCodexAppMock(...args),
   },
   settingsApi: {
     get: (...args: unknown[]) => settingsApiGetMock(...args),
@@ -113,11 +117,15 @@ beforeEach(() => {
   switchProviderMutateAsync.mockReset();
   providersApiUpdateMock.mockReset();
   providersApiUpdateTrayMenuMock.mockReset();
+  providersApiOpenTerminalMock.mockReset();
+  providersApiOpenCodexAppMock.mockReset();
   settingsApiGetMock.mockReset();
   settingsApiApplyMock.mockReset();
   openclawApiGetModelCatalogMock.mockReset();
   openclawApiGetDefaultModelMock.mockReset();
   openclawApiSetDefaultModelMock.mockReset();
+  providersApiOpenTerminalMock.mockResolvedValue(true);
+  providersApiOpenCodexAppMock.mockResolvedValue(true);
   toastSuccessMock.mockReset();
   toastErrorMock.mockReset();
   toastInfoMock.mockReset();
@@ -176,7 +184,7 @@ describe("useProviderActions", () => {
     expect(providersApiUpdateTrayMenuMock).toHaveBeenCalledTimes(1);
   });
 
-  it("should not request plugin sync when switching non-Claude provider", async () => {
+  it("should open Codex app after switching a custom Codex provider", async () => {
     switchProviderMutateAsync.mockResolvedValueOnce(undefined);
     const { wrapper } = createWrapper();
     const provider = createProvider({ category: "custom" });
@@ -192,10 +200,31 @@ describe("useProviderActions", () => {
     expect(switchProviderMutateAsync).toHaveBeenCalledWith(provider.id);
     expect(settingsApiGetMock).not.toHaveBeenCalled();
     expect(settingsApiApplyMock).not.toHaveBeenCalled();
-    expect(toastSuccessMock).toHaveBeenCalledWith(
-      "切换成功，请重启客户端以生效",
-      { closeButton: true },
-    );
+    expect(providersApiOpenCodexAppMock).toHaveBeenCalledTimes(1);
+    expect(providersApiOpenTerminalMock).not.toHaveBeenCalled();
+    expect(toastSuccessMock).toHaveBeenCalledWith("已切换并重启 Codex", {
+      closeButton: true,
+    });
+  });
+
+  it("should open Codex app after switching an official Codex provider", async () => {
+    switchProviderMutateAsync.mockResolvedValueOnce(undefined);
+    const { wrapper } = createWrapper();
+    const provider = createProvider({ category: "official" });
+
+    const { result } = renderHook(() => useProviderActions("codex"), {
+      wrapper,
+    });
+
+    await act(async () => {
+      await result.current.switchProvider(provider);
+    });
+
+    expect(switchProviderMutateAsync).toHaveBeenCalledWith(provider.id);
+    expect(providersApiOpenCodexAppMock).toHaveBeenCalledTimes(1);
+    expect(toastSuccessMock).toHaveBeenCalledWith("已切换并重启 Codex", {
+      closeButton: true,
+    });
   });
 
   it("warns but still switches providers that require proxy when proxy is not running", async () => {

@@ -287,6 +287,12 @@ pub struct LocalMigrations {
         Option<CodexThirdPartyHistoryProviderBucketMigration>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_provider_template_v1: Option<CodexProviderTemplateMigration>,
+    #[serde(default)]
+    pub codex_unified_session_history_default_enabled_v1: bool,
+    #[serde(default)]
+    pub codex_unified_existing_history_default_migrate_v1: bool,
+    #[serde(default)]
+    pub codex_preserve_official_auth_default_enabled_v1: bool,
     /// 统一会话开关的官方历史迁移标记。开关关闭时会被清除，
     /// 这样重新开启能把"关闭期间"落入 openai 桶的官方会话补迁进来。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -373,13 +379,10 @@ pub struct AppSettings {
     #[serde(default)]
     pub enable_failover_toggle: bool,
     /// Keep Codex ChatGPT login material in auth.json when switching to third-party providers.
-    /// Opt-in: defaults to false so third-party switches cleanly overwrite auth.json.
-    #[serde(default)]
+    /// Enabled by default so Codex app plugins and mobile remote control can keep working.
+    #[serde(default = "default_true")]
     pub preserve_codex_official_auth_on_switch: bool,
-    /// Run official Codex providers under the shared "custom" model_provider id
-    /// so official sessions share one resume-history bucket with third-party
-    /// providers. Opt-in: defaults to false.
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub unify_codex_session_history: bool,
     /// User opted in (via the enable dialog checkbox) to migrate existing
     /// official sessions ("openai" bucket) into the shared bucket. Persisted so
@@ -503,8 +506,8 @@ impl Default for AppSettings {
             usage_confirmed: None,
             stream_check_confirmed: None,
             enable_failover_toggle: false,
-            preserve_codex_official_auth_on_switch: false,
-            unify_codex_session_history: false,
+            preserve_codex_official_auth_on_switch: true,
+            unify_codex_session_history: true,
             unify_codex_migrate_existing: None,
             failover_confirmed: None,
             first_run_notice_confirmed: None,
@@ -730,6 +733,50 @@ pub fn update_settings(mut new_settings: AppSettings) -> Result<(), AppError> {
     });
     *guard = new_settings;
     Ok(())
+}
+
+pub fn ensure_codex_unified_session_history_default_enabled() -> Result<(), AppError> {
+    mutate_settings(|settings| {
+        let already_enabled_by_default = settings
+            .local_migrations
+            .as_ref()
+            .is_some_and(|migrations| migrations.codex_unified_session_history_default_enabled_v1);
+        if !already_enabled_by_default {
+            settings.unify_codex_session_history = true;
+            settings
+                .local_migrations
+                .get_or_insert_with(Default::default)
+                .codex_unified_session_history_default_enabled_v1 = true;
+        }
+
+        let existing_history_default_migrate_requested = settings
+            .local_migrations
+            .as_ref()
+            .is_some_and(|migrations| migrations.codex_unified_existing_history_default_migrate_v1);
+        if !existing_history_default_migrate_requested && settings.unify_codex_session_history {
+            settings.unify_codex_migrate_existing = Some(true);
+            settings
+                .local_migrations
+                .get_or_insert_with(Default::default)
+                .codex_unified_existing_history_default_migrate_v1 = true;
+        }
+    })
+}
+
+pub fn ensure_codex_preserve_official_auth_default_enabled() -> Result<(), AppError> {
+    mutate_settings(|settings| {
+        let already_enabled_by_default = settings
+            .local_migrations
+            .as_ref()
+            .is_some_and(|migrations| migrations.codex_preserve_official_auth_default_enabled_v1);
+        if !already_enabled_by_default {
+            settings.preserve_codex_official_auth_on_switch = true;
+            settings
+                .local_migrations
+                .get_or_insert_with(Default::default)
+                .codex_preserve_official_auth_default_enabled_v1 = true;
+        }
+    })
 }
 
 fn mutate_settings<F>(mutator: F) -> Result<(), AppError>

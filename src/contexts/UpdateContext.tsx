@@ -8,6 +8,8 @@ import React, {
 } from "react";
 import type { UpdateInfo } from "../lib/updater";
 import { checkForUpdate } from "../lib/updater";
+import { settingsApi } from "@/lib/api";
+import { toast } from "sonner";
 
 interface UpdateContextValue {
   // 更新状态
@@ -21,7 +23,7 @@ interface UpdateContextValue {
   dismissUpdate: () => void;
 
   // 操作方法
-  checkUpdate: () => Promise<boolean>;
+  checkUpdate: (options?: { notify?: boolean }) => Promise<boolean>;
   resetDismiss: () => void;
 }
 
@@ -36,6 +38,7 @@ export function UpdateProvider({ children }: { children: React.ReactNode }) {
   const [isChecking, setIsChecking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isDismissed, setIsDismissed] = useState(false);
+  const promptedVersionRef = useRef<string | null>(null);
 
   // 从 localStorage 读取已关闭的版本
   useEffect(() => {
@@ -58,7 +61,40 @@ export function UpdateProvider({ children }: { children: React.ReactNode }) {
 
   const isCheckingRef = useRef(false);
 
-  const checkUpdate = useCallback(async () => {
+  const openInstaller = useCallback(async (info: UpdateInfo) => {
+    try {
+      await settingsApi.launchCcSwitchUpdateInstaller(info.installerUrl);
+    } catch (error) {
+      console.error("启动更新脚本失败:", error);
+      toast.error("启动更新脚本失败", {
+        description: error instanceof Error ? error.message : String(error),
+        closeButton: true,
+      });
+    }
+  }, []);
+
+  const notifyUpdateAvailable = useCallback(
+    (info: UpdateInfo, dismissed: boolean) => {
+      if (dismissed || promptedVersionRef.current === info.availableVersion) {
+        return;
+      }
+      promptedVersionRef.current = info.availableVersion;
+      toast.info(`检测到 CC Switch 新版本 v${info.availableVersion}`, {
+        description: info.notes || "点击立即更新会打开终端执行一键安装脚本。",
+        closeButton: true,
+        duration: 12000,
+        action: {
+          label: "立即更新",
+          onClick: () => {
+            void openInstaller(info);
+          },
+        },
+      });
+    },
+    [openInstaller],
+  );
+
+  const checkUpdate = useCallback(async (options?: { notify?: boolean }) => {
     if (isCheckingRef.current) return false;
     isCheckingRef.current = true;
     setIsChecking(true);
@@ -81,7 +117,11 @@ export function UpdateProvider({ children }: { children: React.ReactNode }) {
             dismissedVersion = legacy;
           }
         }
-        setIsDismissed(dismissedVersion === result.info.availableVersion);
+        const dismissed = dismissedVersion === result.info.availableVersion;
+        setIsDismissed(dismissed);
+        if (options?.notify !== false) {
+          notifyUpdateAvailable(result.info, dismissed);
+        }
         return true; // 有更新
       } else {
         setHasUpdate(false);
@@ -98,7 +138,7 @@ export function UpdateProvider({ children }: { children: React.ReactNode }) {
       setIsChecking(false);
       isCheckingRef.current = false;
     }
-  }, []);
+  }, [notifyUpdateAvailable]);
 
   const dismissUpdate = useCallback(() => {
     setIsDismissed(true);
@@ -119,7 +159,7 @@ export function UpdateProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     // 延迟1秒后检查，避免影响启动体验
     const timer = setTimeout(() => {
-      checkUpdate().catch(console.error);
+      checkUpdate({ notify: true }).catch(console.error);
     }, 1000);
 
     return () => clearTimeout(timer);

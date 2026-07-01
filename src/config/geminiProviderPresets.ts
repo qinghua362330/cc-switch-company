@@ -34,7 +34,7 @@ export interface GeminiProviderPreset {
 
 export const geminiProviderPresets: GeminiProviderPreset[] = [
   {
-    name: "Google Official",
+    name: "官方账号登入",
     websiteUrl: "https://ai.google.dev/",
     apiKeyUrl: "https://aistudio.google.com/apikey",
     settingsConfig: {

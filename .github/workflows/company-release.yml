@@ -1,0 +1,306 @@
+name: Company Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, for example v3.16.4-company.1"
+        required: true
+        type: string
+      prerelease:
+        description: "Mark GitHub release as prerelease"
+        required: true
+        default: true
+        type: boolean
+  push:
+    tags:
+      - "v*-company*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: company-release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "22.12.0"
+  PNPM_VERSION: "10.12.3"
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            os: windows-2022
+            platform: windows-x64
+          - name: macOS Universal
+            os: macos-14
+            platform: macos-universal
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve release tag
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          if [ -z "$TAG" ]; then
+            echo "Release tag is empty" >&2
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+
+      - name: Get pnpm store
+        id: pnpm-store
+        shell: bash
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: ${{ runner.os }}-${{ runner.arch }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-pnpm-
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add macOS targets
+        if: runner.os == 'macOS'
+        shell: bash
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-cargo-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Prepare Tauri updater signing key
+        shell: bash
+        env:
+          RAW_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${RAW_PRIVATE_KEY:-}" ]; then
+            echo "TAURI_SIGNING_PRIVATE_KEY is required for updater artifacts." >&2
+            exit 1
+          fi
+
+          key_path="$RUNNER_TEMP/tauri-signing.key"
+          if printf '%s' "$RAW_PRIVATE_KEY" | grep -q '^untrusted comment:'; then
+            printf '%s\n' "$RAW_PRIVATE_KEY" > "$key_path"
+          elif decoded="$(printf '%s' "$RAW_PRIVATE_KEY" | (base64 --decode 2>/dev/null || base64 -D 2>/dev/null))" \
+            && printf '%s' "$decoded" | grep -q '^untrusted comment:'; then
+            printf '%s\n' "$decoded" > "$key_path"
+          else
+            printf 'untrusted comment: tauri signing key\n%s\n' "$(printf '%s' "$RAW_PRIVATE_KEY" | tr -d '\r\n')" > "$key_path"
+          fi
+
+          {
+            echo "TAURI_SIGNING_PRIVATE_KEY<<__TAURI_KEY__"
+            cat "$key_path"
+            echo "__TAURI_KEY__"
+          } >> "$GITHUB_ENV"
+
+          if [ -n "${PRIVATE_KEY_PASSWORD:-}" ]; then
+            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$PRIVATE_KEY_PASSWORD" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build Windows x64
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: pnpm tauri build --target x86_64-pc-windows-msvc --bundles msi
+
+      - name: Build macOS universal
+        if: runner.os == 'macOS'
+        shell: bash
+        run: pnpm tauri build --target universal-apple-darwin --bundles app
+
+      - name: Prepare Windows artifacts
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path release-assets | Out-Null
+          $targetRoot = 'src-tauri/target/x86_64-pc-windows-msvc/release'
+          if (-not (Test-Path $targetRoot)) {
+            $targetRoot = 'src-tauri/target/release'
+          }
+
+          $msi = Get-ChildItem -Path (Join-Path $targetRoot 'bundle/msi') -Recurse -Filter *.msi -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($null -eq $msi) {
+            throw 'No Windows x64 MSI was produced.'
+          }
+
+          $msiDest = "CC-Switch-$env:TAG-Windows-company-x64.msi"
+          Copy-Item $msi.FullName (Join-Path release-assets $msiDest)
+          if (Test-Path "$($msi.FullName).sig") {
+            Copy-Item "$($msi.FullName).sig" (Join-Path release-assets "$msiDest.sig")
+          } else {
+            throw "No updater signature produced for $($msi.Name)."
+          }
+
+          $exe = Join-Path $targetRoot 'cc-switch.exe'
+          if (-not (Test-Path $exe)) {
+            throw 'No Windows x64 executable was produced.'
+          }
+          $portableDir = 'release-assets/CC-Switch-Portable'
+          New-Item -ItemType Directory -Force -Path $portableDir | Out-Null
+          Copy-Item $exe $portableDir
+          @(
+            '# CC Switch company portable x64 build marker',
+            'portable=true',
+            'edition=company',
+            'arch=x64'
+          ) | Set-Content -Path (Join-Path $portableDir 'portable.ini') -Encoding UTF8
+          Compress-Archive -Path "$portableDir/*" -DestinationPath "release-assets/CC-Switch-$env:TAG-Windows-company-x64-Portable.zip" -Force
+
+      - name: Prepare macOS artifacts
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          bundle_dir="src-tauri/target/universal-apple-darwin/release/bundle/macos"
+          app_path="$(find "$bundle_dir" -maxdepth 1 -name '*.app' -type d | head -1)"
+          tar_path="$(find "$bundle_dir" -maxdepth 1 -name '*.tar.gz' -type f | head -1)"
+          if [ -z "$app_path" ]; then
+            echo "No macOS .app was produced." >&2
+            exit 1
+          fi
+          if [ -z "$tar_path" ]; then
+            echo "No macOS updater tar.gz was produced." >&2
+            exit 1
+          fi
+
+          tar_dest="CC-Switch-$TAG-macOS-company-universal.tar.gz"
+          cp "$tar_path" "release-assets/$tar_dest"
+          if [ -f "$tar_path.sig" ]; then
+            cp "$tar_path.sig" "release-assets/$tar_dest.sig"
+          else
+            echo "No updater signature produced for macOS tar.gz." >&2
+            exit 1
+          fi
+
+          ditto -c -k --sequesterRsrc --keepParent "$app_path" "release-assets/CC-Switch-$TAG-macOS-company-universal.zip"
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: company-release-${{ matrix.platform }}
+          path: release-assets/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish company release
+    runs-on: ubuntu-22.04
+    needs: build
+    steps:
+      - name: Resolve release tag
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: company-release-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate latest-company.json
+        shell: bash
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          base_url="https://github.com/$REPO/releases/download/$TAG"
+          pub_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          win_msi="$(find release-assets -maxdepth 1 -name '*Windows-company-x64.msi' -type f | head -1)"
+          win_sig="$(cat "$win_msi.sig")"
+          mac_tgz="$(find release-assets -maxdepth 1 -name '*macOS-company-universal.tar.gz' -type f | head -1)"
+          mac_sig="$(cat "$mac_tgz.sig")"
+          win_name="$(basename "$win_msi")"
+          mac_name="$(basename "$mac_tgz")"
+          cat > release-assets/latest-company.json <<EOF_JSON
+          {
+            "version": "$VERSION",
+            "notes": "CC Switch company release $TAG",
+            "pub_date": "$pub_date",
+            "platforms": {
+              "windows-x86_64": {
+                "signature": "$win_sig",
+                "url": "$base_url/$win_name"
+              },
+              "darwin-aarch64": {
+                "signature": "$mac_sig",
+                "url": "$base_url/$mac_name"
+              },
+              "darwin-x86_64": {
+                "signature": "$mac_sig",
+                "url": "$base_url/$mac_name"
+              }
+            }
+          }
+          EOF_JSON
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: CC Switch Company ${{ steps.meta.outputs.tag }}
+          prerelease: ${{ github.event.inputs.prerelease || true }}
+          body: |
+            ## CC Switch Company ${{ steps.meta.outputs.tag }}
+
+            公司版发布产物，请优先下载对应平台安装包。
+
+            - Windows x64: `CC-Switch-${{ steps.meta.outputs.tag }}-Windows-company-x64.msi`
+            - Windows x64 Portable: `CC-Switch-${{ steps.meta.outputs.tag }}-Windows-company-x64-Portable.zip`
+            - macOS Universal: `CC-Switch-${{ steps.meta.outputs.tag }}-macOS-company-universal.zip`
+
+            `latest-company.json` 用于公司版自动更新。
+          files: release-assets/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

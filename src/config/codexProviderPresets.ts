@@ -87,7 +87,7 @@ function modelCatalog(
 
 export const codexProviderPresets: CodexProviderPreset[] = [
   {
-    name: "OpenAI Official",
+    name: "官方账号登入",
     websiteUrl: "https://chatgpt.com/codex",
     isOfficial: true,
     category: "official",

@@ -49,13 +49,18 @@ pub(crate) fn detect_gemini_auth_type(provider: &Provider) -> GeminiAuthType {
         }
     }
 
-    // Priority 2: Check Google Official (name matching)
+    // Priority 2: Check official category (seeded Google OAuth provider)
+    if provider.category.as_deref() == Some("official") {
+        return GeminiAuthType::GoogleOfficial;
+    }
+
+    // Priority 3: Check Google Official (legacy name matching)
     let name_lower = provider.name.to_ascii_lowercase();
     if name_lower == "google" || name_lower.starts_with("google ") {
         return GeminiAuthType::GoogleOfficial;
     }
 
-    // Priority 3: Check PackyCode keywords
+    // Priority 4: Check PackyCode keywords
     if contains_packycode_keyword(&provider.name) {
         return GeminiAuthType::Packycode;
     }

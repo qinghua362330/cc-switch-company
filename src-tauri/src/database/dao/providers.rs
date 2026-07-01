@@ -650,6 +650,36 @@ impl Database {
         Ok(inserted)
     }
 
+    pub fn normalize_official_provider_display_names(&self) -> Result<usize, AppError> {
+        use crate::app_config::AppType;
+        use crate::database::dao::providers_seed::OFFICIAL_ACCOUNT_LOGIN_NAME;
+
+        let mut updated = 0_usize;
+
+        for app_type in [
+            AppType::Claude,
+            AppType::ClaudeDesktop,
+            AppType::Codex,
+            AppType::Gemini,
+        ] {
+            let providers = self.get_all_providers(app_type.as_str())?;
+
+            for (_, mut provider) in providers {
+                if provider.category.as_deref() != Some("official")
+                    || provider.name == OFFICIAL_ACCOUNT_LOGIN_NAME
+                {
+                    continue;
+                }
+
+                provider.name = OFFICIAL_ACCOUNT_LOGIN_NAME.to_string();
+                self.save_provider(app_type.as_str(), &provider)?;
+                updated += 1;
+            }
+        }
+
+        Ok(updated)
+    }
+
     /// 按 id 兜底插入单条 official seed（仅当目标表中该 id 不存在时插入）。
     ///
     /// 与 `init_default_official_providers` 不同：
@@ -729,7 +759,10 @@ mod ensure_official_seed_tests {
             .expect("provider exists after ensure");
 
         assert_eq!(provider.id, CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID);
-        assert_eq!(provider.name, "Claude Desktop Official");
+        assert_eq!(
+            provider.name,
+            crate::database::dao::providers_seed::OFFICIAL_ACCOUNT_LOGIN_NAME
+        );
         assert_eq!(provider.category.as_deref(), Some("official"));
         assert_eq!(provider.icon.as_deref(), Some("anthropic"));
         assert_eq!(provider.icon_color.as_deref(), Some("#D4915D"));

@@ -4,13 +4,14 @@
 //! 写入 `providers` 表，让所有用户都能看到一个"一键切回官方"的入口。
 //!
 //! 字段与前端预设保持一致，参见：
-//! - `src/config/claudeProviderPresets.ts`（"Claude Official"）
-//! - `src/config/codexProviderPresets.ts`（"OpenAI Official"）
-//! - `src/config/geminiProviderPresets.ts`（"Google Official"）
+//! - `src/config/claudeProviderPresets.ts`
+//! - `src/config/codexProviderPresets.ts`
+//! - `src/config/geminiProviderPresets.ts`
 
 use crate::app_config::AppType;
 
 pub(crate) const CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID: &str = "claude-desktop-official";
+pub(crate) const OFFICIAL_ACCOUNT_LOGIN_NAME: &str = "官方账号登入";
 
 /// 单条官方供应商种子定义。
 pub(crate) struct OfficialProviderSeed {
@@ -26,12 +27,12 @@ pub(crate) struct OfficialProviderSeed {
 
 /// Claude / Claude Desktop / Codex / Gemini 的官方预设。
 ///
-/// id 固定，便于幂等检查；name 直接用英文原名（与前端预设一致），不做 i18n。
+/// id 固定，便于幂等检查；name 与前端预设一致。
 pub(crate) const OFFICIAL_SEEDS: &[OfficialProviderSeed] = &[
     OfficialProviderSeed {
         id: "claude-official",
         app_type: AppType::Claude,
-        name: "Claude Official",
+        name: OFFICIAL_ACCOUNT_LOGIN_NAME,
         website_url: "https://www.anthropic.com/claude-code",
         icon: "anthropic",
         icon_color: "#D4915D",
@@ -41,7 +42,7 @@ pub(crate) const OFFICIAL_SEEDS: &[OfficialProviderSeed] = &[
     OfficialProviderSeed {
         id: CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID,
         app_type: AppType::ClaudeDesktop,
-        name: "Claude Desktop Official",
+        name: OFFICIAL_ACCOUNT_LOGIN_NAME,
         website_url: "https://claude.ai/download",
         icon: "anthropic",
         icon_color: "#D4915D",
@@ -51,7 +52,7 @@ pub(crate) const OFFICIAL_SEEDS: &[OfficialProviderSeed] = &[
     OfficialProviderSeed {
         id: "codex-official",
         app_type: AppType::Codex,
-        name: "OpenAI Official",
+        name: OFFICIAL_ACCOUNT_LOGIN_NAME,
         website_url: "https://chatgpt.com/codex",
         icon: "openai",
         icon_color: "#00A67E",
@@ -61,7 +62,7 @@ pub(crate) const OFFICIAL_SEEDS: &[OfficialProviderSeed] = &[
     OfficialProviderSeed {
         id: "gemini-official",
         app_type: AppType::Gemini,
-        name: "Google Official",
+        name: OFFICIAL_ACCOUNT_LOGIN_NAME,
         website_url: "https://ai.google.dev/",
         icon: "gemini",
         icon_color: "#4285F4",

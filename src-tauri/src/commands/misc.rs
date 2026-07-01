@@ -7,6 +7,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::str::FromStr;
 use tauri::AppHandle;
 use tauri::State;
@@ -17,6 +18,35 @@ use std::os::windows::process::CommandExt;
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+const CC_SWITCH_UPDATE_MANIFEST_URL: &str = "https://leharrt.com/cc-switch/latest.json";
+const CC_SWITCH_INSTALLER_URL: &str = "https://leharrt.com/cc-switch/install.sh";
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CcSwitchUpdateManifest {
+    #[serde(alias = "latestVersion", alias = "availableVersion")]
+    pub version: String,
+    #[serde(default)]
+    pub notes: Option<String>,
+    #[serde(default, alias = "pubDate", alias = "publishedAt")]
+    pub pub_date: Option<String>,
+    #[serde(
+        default,
+        alias = "installer_url",
+        alias = "installUrl",
+        alias = "install_url"
+    )]
+    pub installer_url: Option<String>,
+    #[serde(default, alias = "download_url", alias = "downloadUrl")]
+    pub download_url: Option<String>,
+    #[serde(
+        default,
+        alias = "release_notes_url",
+        alias = "releaseNotesUrl",
+        alias = "releaseUrl"
+    )]
+    pub release_notes_url: Option<String>,
+}
 
 /// 打开外部链接
 #[tauri::command]
@@ -32,6 +62,73 @@ pub async fn open_external(app: AppHandle, url: String) -> Result<bool, String> 
         .map_err(|e| format!("打开链接失败: {e}"))?;
 
     Ok(true)
+}
+
+#[tauri::command]
+pub async fn open_codex_app() -> Result<bool, String> {
+    #[cfg(target_os = "macos")]
+    {
+        if is_process_running_macos("Codex") {
+            let _ = Command::new("pkill").args(["-9", "-x", "Codex"]).output();
+            wait_for_process_exit_macos("Codex", 20, 100);
+        }
+
+        let output = Command::new("open")
+            .args(["-a", "Codex"])
+            .output()
+            .map_err(|e| format!("重启 Codex 应用失败: {e}"))?;
+        if !output.status.success() {
+            let stderr = decode_command_output(&output.stderr);
+            return Err(format!("重启 Codex 应用失败: {stderr}"));
+        }
+        return Ok(true);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let output = Command::new("cmd")
+            .args(["/C", "start", "", "Codex"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map_err(|e| format!("启动 Codex 应用失败: {e}"))?;
+        if !output.status.success() {
+            let stderr = decode_command_output(&output.stderr);
+            return Err(format!("启动 Codex 应用失败: {stderr}"));
+        }
+        return Ok(true);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let output = Command::new("sh")
+            .args(["-lc", "gtk-launch codex || xdg-open codex.desktop"])
+            .output()
+            .map_err(|e| format!("启动 Codex 应用失败: {e}"))?;
+        if !output.status.success() {
+            let stderr = decode_command_output(&output.stderr);
+            return Err(format!("启动 Codex 应用失败: {stderr}"));
+        }
+        Ok(true)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn is_process_running_macos(process_name: &str) -> bool {
+    Command::new("pgrep")
+        .args(["-x", process_name])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
+fn wait_for_process_exit_macos(process_name: &str, attempts: usize, delay_ms: u64) {
+    for _ in 0..attempts {
+        if !is_process_running_macos(process_name) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+    }
 }
 
 #[tauri::command]
@@ -61,6 +158,95 @@ pub async fn check_for_updates(handle: AppHandle) -> Result<bool, String> {
         )
         .map_err(|e| format!("打开更新页面失败: {e}"))?;
 
+    Ok(true)
+}
+
+fn ensure_http_url(url: &str) -> Result<(), String> {
+    let parsed = url::Url::parse(url).map_err(|_| "无效的 URL".to_string())?;
+    match parsed.scheme() {
+        "http" | "https" => Ok(()),
+        _ => Err("仅支持 http/https URL".to_string()),
+    }
+}
+
+/// 检查公司分发源上的 CC Switch 更新清单。
+#[tauri::command]
+pub async fn check_cc_switch_update_manifest(
+    manifestUrl: Option<String>,
+) -> Result<CcSwitchUpdateManifest, String> {
+    let manifest_url = manifestUrl
+        .filter(|url| !url.trim().is_empty())
+        .unwrap_or_else(|| CC_SWITCH_UPDATE_MANIFEST_URL.to_string());
+    ensure_http_url(&manifest_url)?;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("初始化更新检查客户端失败: {e}"))?;
+
+    let response = client
+        .get(&manifest_url)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .send()
+        .await
+        .map_err(|e| format!("获取更新清单失败: {e}"))?;
+
+    if !response.status().is_success() {
+        return Err(format!("更新清单返回 HTTP {}", response.status()));
+    }
+
+    let mut manifest = response
+        .json::<CcSwitchUpdateManifest>()
+        .await
+        .map_err(|e| format!("解析更新清单失败: {e}"))?;
+
+    if manifest.version.trim().is_empty() {
+        return Err("更新清单缺少 version".to_string());
+    }
+
+    if manifest
+        .installer_url
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .is_empty()
+    {
+        manifest.installer_url = Some(CC_SWITCH_INSTALLER_URL.to_string());
+    }
+
+    if let Some(url) = manifest.installer_url.as_deref() {
+        ensure_http_url(url)?;
+    }
+    if let Some(url) = manifest.download_url.as_deref() {
+        ensure_http_url(url)?;
+    }
+    if let Some(url) = manifest.release_notes_url.as_deref() {
+        ensure_http_url(url)?;
+    }
+
+    Ok(manifest)
+}
+
+/// 打开终端执行 CC Switch 一键更新脚本。
+#[tauri::command]
+pub async fn launch_cc_switch_update_installer(
+    installerUrl: Option<String>,
+) -> Result<bool, String> {
+    let installer_url = installerUrl
+        .filter(|url| !url.trim().is_empty())
+        .unwrap_or_else(|| CC_SWITCH_INSTALLER_URL.to_string());
+    ensure_http_url(&installer_url)?;
+
+    let command = format!(
+        r#"tmp=$(mktemp)
+curl -fsSL {url} -o "$tmp"
+bash "$tmp"
+status=$?
+rm -f "$tmp"
+exit $status"#,
+        url = shell_single_quote(&installer_url),
+    );
+    launch_terminal_running(&command, "cc_switch_update")?;
     Ok(true)
 }
 
@@ -1131,18 +1317,34 @@ fn build_exec_line(shell: &str, cwd: Option<&Path>) -> String {
     }
 }
 
-/// 构建 provider 命令行：通过用户 shell 的交互模式执行，确保 GUI 启动的终端也加载用户 PATH。
-fn build_provider_command_line(shell: &str, config_path: &str, cwd: Option<&Path>) -> String {
-    let claude_command = format!("claude --settings {}", shell_single_quote(config_path));
+fn provider_command_for_app(app_type: &AppType, config_path: &str) -> String {
+    match app_type {
+        AppType::Claude | AppType::ClaudeDesktop | AppType::Hermes => {
+            format!("claude --settings {}", shell_single_quote(config_path))
+        }
+        AppType::Codex => "codex".to_string(),
+        AppType::Gemini => "gemini".to_string(),
+        AppType::OpenCode => "opencode".to_string(),
+        AppType::OpenClaw => "openclaw".to_string(),
+    }
+}
+
+fn build_provider_command_line(
+    shell: &str,
+    config_path: &str,
+    app_type: &AppType,
+    cwd: Option<&Path>,
+) -> String {
+    let provider_command = provider_command_for_app(app_type, config_path);
     let command = cwd
         .map(|dir| {
             format!(
                 "cd {} && {}",
                 shell_single_quote(&dir.to_string_lossy()),
-                claude_command
+                provider_command
             )
         })
-        .unwrap_or(claude_command);
+        .unwrap_or(provider_command);
 
     format!(
         "{} {} {}",
@@ -2587,7 +2789,7 @@ pub async fn open_provider_terminal(
     let env_vars = extract_env_vars_from_config(config, &app_type);
 
     // 根据平台启动终端，传入提供商ID用于生成唯一的配置文件名
-    launch_terminal_with_env(env_vars, &providerId, launch_cwd.as_deref())
+    launch_terminal_with_env(env_vars, &providerId, &app_type, launch_cwd.as_deref())
         .map_err(|e| format!("启动终端失败: {e}"))?;
 
     Ok(true)
@@ -2685,11 +2887,13 @@ fn resolve_launch_cwd(cwd: Option<String>) -> Result<Option<PathBuf>, String> {
 fn launch_terminal_with_env(
     env_vars: Vec<(String, String)>,
     provider_id: &str,
+    app_type: &AppType,
     cwd: Option<&Path>,
 ) -> Result<(), String> {
     let temp_dir = std::env::temp_dir();
     let config_file = temp_dir.join(format!(
-        "claude_{}_{}.json",
+        "{}_{}_{}.json",
+        app_type.as_str(),
         provider_id,
         std::process::id()
     ));
@@ -2699,19 +2903,19 @@ fn launch_terminal_with_env(
 
     #[cfg(target_os = "macos")]
     {
-        launch_macos_terminal(&config_file, cwd)?;
+        launch_macos_terminal(&config_file, app_type, cwd)?;
         Ok(())
     }
 
     #[cfg(target_os = "linux")]
     {
-        launch_linux_terminal(&config_file, cwd)?;
+        launch_linux_terminal(&config_file, app_type, cwd)?;
         Ok(())
     }
 
     #[cfg(target_os = "windows")]
     {
-        launch_windows_terminal(&temp_dir, &config_file, cwd)?;
+        launch_windows_terminal(&temp_dir, &config_file, app_type, cwd)?;
         return Ok(());
     }
 
@@ -2741,7 +2945,11 @@ fn write_claude_config(
 
 /// macOS: 根据用户首选终端启动
 #[cfg(target_os = "macos")]
-fn launch_macos_terminal(config_file: &std::path::Path, cwd: Option<&Path>) -> Result<(), String> {
+fn launch_macos_terminal(
+    config_file: &std::path::Path,
+    app_type: &AppType,
+    cwd: Option<&Path>,
+) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
 
     let preferred = crate::settings::get_preferred_terminal();
@@ -2754,14 +2962,14 @@ fn launch_macos_terminal(config_file: &std::path::Path, cwd: Option<&Path>) -> R
     let temp_dir = std::env::temp_dir();
     let script_file = temp_dir.join(format!("cc_switch_launcher_{}.sh", std::process::id()));
     let config_path = config_file.to_string_lossy();
-    let provider_command = build_provider_command_line(&shell, &config_path, cwd);
+    let provider_command = build_provider_command_line(&shell, &config_path, app_type, cwd);
 
     // Write the shell script to a temp file
     // 脚本使用 POSIX sh 语法确保可移植性，exec 行切换到用户交互式 shell
     let script_content = format!(
         r#"#!/usr/bin/env sh
 trap 'rm -f "{config_path}" "{script_file}"' EXIT
-echo "Using provider-specific claude config:"
+echo "Using provider-specific config:"
 echo "{config_path}"
 {provider_command}
 {final_cd_command}
@@ -3061,7 +3269,11 @@ fn launch_macos_warp(script_file: &std::path::Path) -> Result<(), String> {
 
 /// Linux: 根据用户首选终端启动
 #[cfg(target_os = "linux")]
-fn launch_linux_terminal(config_file: &std::path::Path, cwd: Option<&Path>) -> Result<(), String> {
+fn launch_linux_terminal(
+    config_file: &std::path::Path,
+    app_type: &AppType,
+    cwd: Option<&Path>,
+) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
 
@@ -3087,12 +3299,12 @@ fn launch_linux_terminal(config_file: &std::path::Path, cwd: Option<&Path>) -> R
     let temp_dir = std::env::temp_dir();
     let script_file = temp_dir.join(format!("cc_switch_launcher_{}.sh", std::process::id()));
     let config_path = config_file.to_string_lossy();
-    let provider_command = build_provider_command_line(&shell, &config_path, cwd);
+    let provider_command = build_provider_command_line(&shell, &config_path, app_type, cwd);
 
     let script_content = format!(
         r#"#!/usr/bin/env sh
 trap 'rm -f "{config_path}" "{script_file}"' EXIT
-echo "Using provider-specific claude config:"
+echo "Using provider-specific config:"
 echo "{config_path}"
 {provider_command}
 {final_cd_command}
@@ -3181,27 +3393,33 @@ fn which_command(cmd: &str) -> bool {
 fn launch_windows_terminal(
     temp_dir: &std::path::Path,
     config_file: &std::path::Path,
+    app_type: &AppType,
     cwd: Option<&Path>,
 ) -> Result<(), String> {
     let preferred = crate::settings::get_preferred_terminal();
     let terminal = preferred.as_deref().unwrap_or("cmd");
 
-    let bat_file = temp_dir.join(format!("cc_switch_claude_{}.bat", std::process::id()));
+    let bat_file = temp_dir.join(format!(
+        "cc_switch_{}_{}.bat",
+        app_type.as_str(),
+        std::process::id()
+    ));
     let config_path_for_batch = escape_windows_batch_value(&config_file.to_string_lossy());
     let cwd_command = build_windows_cwd_command(cwd);
+    let provider_command = build_windows_provider_command(app_type, &config_path_for_batch);
 
     let content = format!(
         "@echo off
 {cwd_command}
-echo Using provider-specific claude config:
+echo Using provider-specific config:
 echo {}
-claude --settings \"{}\"
+{provider_command}
 del \"{}\" >nul 2>&1
 del \"%~f0\" >nul 2>&1
 ",
         config_path_for_batch,
         config_path_for_batch,
-        config_path_for_batch,
+        provider_command = provider_command,
         cwd_command = cwd_command,
     );
 
@@ -3258,6 +3476,19 @@ fn build_windows_cwd_command_str(path: &str) -> String {
 fn build_windows_cwd_command(cwd: Option<&Path>) -> String {
     cwd.map(|dir| build_windows_cwd_command_str(&dir.to_string_lossy()))
         .unwrap_or_default()
+}
+
+#[cfg(target_os = "windows")]
+fn build_windows_provider_command(app_type: &AppType, config_path_for_batch: &str) -> String {
+    match app_type {
+        AppType::Claude | AppType::ClaudeDesktop | AppType::Hermes => {
+            format!("claude --settings \"{config_path_for_batch}\"")
+        }
+        AppType::Codex => "codex".to_string(),
+        AppType::Gemini => "gemini".to_string(),
+        AppType::OpenCode => "opencode".to_string(),
+        AppType::OpenClaw => "openclaw".to_string(),
+    }
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -3535,13 +3766,19 @@ mod tests {
     #[test]
     fn test_build_provider_command_line_uses_user_shell_environment() {
         assert_eq!(
-            build_provider_command_line("/bin/zsh", "/tmp/claude config.json", None),
+            build_provider_command_line(
+                "/bin/zsh",
+                "/tmp/claude config.json",
+                &AppType::Claude,
+                None
+            ),
             "'/bin/zsh' -lic 'claude --settings '\"'\"'/tmp/claude config.json'\"'\"''"
         );
         assert_eq!(
             build_provider_command_line(
                 "/bin/bash",
                 "/tmp/claude config.json",
+                &AppType::Claude,
                 Some(Path::new("/tmp/project"))
             ),
             r#"'/bin/bash' -ic 'cd '"'"'/tmp/project'"'"' && claude --settings '"'"'/tmp/claude config.json'"'"''"#
@@ -3550,9 +3787,19 @@ mod tests {
             build_provider_command_line(
                 "/bin/sh",
                 "/tmp/claude config.json",
+                &AppType::Claude,
                 Some(Path::new("/tmp/project O'Brien"))
             ),
             r#"'/bin/sh' -c 'cd '"'"'/tmp/project O'"'"'"'"'"'"'"'"'Brien'"'"' && claude --settings '"'"'/tmp/claude config.json'"'"''"#
+        );
+        assert_eq!(
+            build_provider_command_line(
+                "/bin/zsh",
+                "/tmp/codex config.json",
+                &AppType::Codex,
+                None
+            ),
+            "'/bin/zsh' -lic 'codex'"
         );
     }
 

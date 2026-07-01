@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useState, useRef } from "react";
+import {
+  type CSSProperties,
+  type ReactNode,
+  useEffect,
+  useMemo,
+  useState,
+  useRef,
+} from "react";
 import { useTranslation } from "react-i18next";
 import { motion, AnimatePresence } from "framer-motion";
 import { toast } from "sonner";
@@ -26,7 +33,11 @@ import {
   Cpu,
   LayoutDashboard,
 } from "lucide-react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import {
+  currentMonitor,
+  getCurrentWindow,
+  LogicalSize,
+} from "@tauri-apps/api/window";
 import type { Provider, VisibleApps } from "@/types";
 import type { EnvConflict } from "@/types/env";
 import { useProvidersQuery, useSettingsQuery } from "@/lib/query";
@@ -54,8 +65,8 @@ import { cn } from "@/lib/utils";
 import {
   isWindows,
   isLinux,
+  DRAG_REGION_ENABLED,
   DRAG_REGION_ATTR,
-  DRAG_REGION_STYLE,
 } from "@/lib/platform";
 import { AppSwitcher } from "@/components/AppSwitcher";
 import { ProviderList } from "@/components/providers/ProviderList";
@@ -94,6 +105,11 @@ import ToolsPanel from "@/components/openclaw/ToolsPanel";
 import AgentsDefaultsPanel from "@/components/openclaw/AgentsDefaultsPanel";
 import OpenClawHealthBanner from "@/components/openclaw/OpenClawHealthBanner";
 import HermesMemoryPanel from "@/components/hermes/HermesMemoryPanel";
+import { CompanyAuthGate } from "@/components/auth/CompanyAuthGate";
+import {
+  COMPANY_CATALOG_SELECT_EVENT,
+  type CompanyCatalogSelectDetail,
+} from "@/components/auth/companyCatalogEvents";
 
 type View =
   | "providers"
@@ -119,6 +135,11 @@ interface SyncStatusUpdatedPayload {
 
 const DEFAULT_DRAG_BAR_HEIGHT = isWindows() || isLinux() ? 0 : 28; // px
 const HEADER_HEIGHT = 64; // px
+const MIN_MAIN_WINDOW_WIDTH = 980;
+const PREFERRED_MAIN_WINDOW_WIDTH = 1240;
+const MIN_MAIN_WINDOW_HEIGHT = 540;
+const HEADER_FIT_PADDING = 88;
+const MONITOR_EDGE_MARGIN = 24;
 
 const STORAGE_KEY = "cc-switch-last-app";
 const VALID_APPS: AppId[] = [
@@ -130,6 +151,21 @@ const VALID_APPS: AppId[] = [
   "openclaw",
   "hermes",
 ];
+
+type TauriDragStyle = CSSProperties & {
+  WebkitAppRegion?: "drag" | "no-drag";
+};
+
+const DRAG_STYLE: TauriDragStyle = DRAG_REGION_ENABLED
+  ? { WebkitAppRegion: "drag" }
+  : {};
+
+const NO_DRAG_STYLE: TauriDragStyle = {
+  WebkitAppRegion: "no-drag",
+};
+
+const isTauriRuntime = (): boolean =>
+  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 const getInitialApp = (): AppId => {
   const saved = localStorage.getItem(STORAGE_KEY) as AppId | null;
@@ -165,7 +201,36 @@ const getInitialView = (): View => {
   return "providers";
 };
 
-function App() {
+const getCompanyCatalogApp = (tool: string | undefined): AppId | null => {
+  const normalized = tool?.toLowerCase();
+  if (!normalized) return null;
+  if (normalized === "claude" || normalized === "claude-code") return "claude";
+  if (normalized === "codex") return "codex";
+  if (normalized === "gemini" || normalized === "gemini-cli") return "gemini";
+  return null;
+};
+
+const getLogicalWidth = (
+  size: { width: number; toLogical?: (scaleFactor: number) => { width: number } },
+  scaleFactor: number,
+): number => {
+  if (typeof size.toLogical === "function") {
+    return size.toLogical(scaleFactor).width;
+  }
+  return size.width;
+};
+
+const getLogicalHeight = (
+  size: { height: number; toLogical?: (scaleFactor: number) => { height: number } },
+  scaleFactor: number,
+): number => {
+  if (typeof size.toLogical === "function") {
+    return size.toLogical(scaleFactor).height;
+  }
+  return size.height;
+};
+
+function AppContent({ authShell }: { authShell: ReactNode }) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
 
@@ -182,6 +247,26 @@ function App() {
   useEffect(() => {
     localStorage.setItem(VIEW_STORAGE_KEY, currentView);
   }, [currentView]);
+
+  useEffect(() => {
+    const handleCatalogSelect = (event: Event) => {
+      const detail = (event as CustomEvent<CompanyCatalogSelectDetail>).detail;
+      const targetApp = getCompanyCatalogApp(detail?.tool);
+      if (!targetApp) return;
+
+      setCurrentView("providers");
+      setActiveApp(targetApp);
+      localStorage.setItem(STORAGE_KEY, targetApp);
+    };
+
+    window.addEventListener(COMPANY_CATALOG_SELECT_EVENT, handleCatalogSelect);
+    return () => {
+      window.removeEventListener(
+        COMPANY_CATALOG_SELECT_EVENT,
+        handleCatalogSelect,
+      );
+    };
+  }, []);
 
   const { data: settingsData } = useSettingsQuery();
   const useAppWindowControls =
@@ -243,6 +328,8 @@ function App() {
   const effectiveUsageProvider = useLastValidValue(usageProvider);
 
   const toolbarRef = useRef<HTMLDivElement>(null);
+  const headerLeftRef = useRef<HTMLDivElement>(null);
+  const headerRightRef = useRef<HTMLDivElement>(null);
   const isToolbarCompact = useAutoCompact(toolbarRef);
 
   useUsageCacheBridge();
@@ -540,6 +627,114 @@ function App() {
 
     checkSkillsMigration();
   }, [t, queryClient]);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+
+    let disposed = false;
+    let animationFrame: number | null = null;
+
+    const fitWindowToHeader = async () => {
+      const headerLeft = headerLeftRef.current;
+      const headerRight = headerRightRef.current;
+      if (!headerLeft || !headerRight) return;
+
+      const neededWidth = Math.ceil(
+        headerLeft.scrollWidth + headerRight.scrollWidth + HEADER_FIT_PADDING,
+      );
+      const targetMinWidth = Math.max(
+        MIN_MAIN_WINDOW_WIDTH,
+        PREFERRED_MAIN_WINDOW_WIDTH,
+        neededWidth,
+      );
+
+      try {
+        const appWindow = getCurrentWindow();
+        const [isFullscreen, isMaximized] = await Promise.all([
+          appWindow.isFullscreen(),
+          appWindow.isMaximized(),
+        ]);
+        if (disposed || isFullscreen || isMaximized) return;
+
+        const scaleFactor = await appWindow.scaleFactor();
+        const innerSize = await appWindow.innerSize();
+        const monitor = await currentMonitor();
+        const maxLogicalWidth = monitor
+          ? Math.floor(
+              monitor.workArea.size.width / monitor.scaleFactor -
+                MONITOR_EDGE_MARGIN,
+            )
+          : window.screen.availWidth - MONITOR_EDGE_MARGIN;
+        const targetWidth = Math.min(targetMinWidth, maxLogicalWidth);
+        const currentWidth = getLogicalWidth(innerSize, scaleFactor);
+        const currentHeight = getLogicalHeight(innerSize, scaleFactor);
+
+        await appWindow.setMinSize(
+          new LogicalSize(targetWidth, MIN_MAIN_WINDOW_HEIGHT),
+        );
+
+        if (targetWidth > currentWidth + 8) {
+          await appWindow.setSize(
+            new LogicalSize(targetWidth, Math.max(currentHeight, 620)),
+          );
+        }
+      } catch (error) {
+        console.warn("[App] Failed to fit window width to header", error);
+      }
+    };
+
+    const scheduleFit = () => {
+      if (animationFrame !== null) {
+        window.cancelAnimationFrame(animationFrame);
+      }
+      animationFrame = window.requestAnimationFrame(() => {
+        animationFrame = null;
+        void fitWindowToHeader();
+      });
+    };
+
+    scheduleFit();
+
+    if (typeof ResizeObserver === "undefined") {
+      return () => {
+        disposed = true;
+        if (animationFrame !== null) {
+          window.cancelAnimationFrame(animationFrame);
+        }
+      };
+    }
+
+    const headerLeft = headerLeftRef.current;
+    const headerRight = headerRightRef.current;
+    if (!headerLeft || !headerRight) {
+      return () => {
+        disposed = true;
+        if (animationFrame !== null) {
+          window.cancelAnimationFrame(animationFrame);
+        }
+      };
+    }
+
+    const observer = new ResizeObserver(scheduleFit);
+    observer.observe(headerLeft);
+    observer.observe(headerRight);
+
+    return () => {
+      disposed = true;
+      observer.disconnect();
+      if (animationFrame !== null) {
+        window.cancelAnimationFrame(animationFrame);
+      }
+    };
+  }, [
+    activeApp,
+    authShell,
+    currentView,
+    isCurrentAppTakeoverActive,
+    isToolbarCompact,
+    settingsData?.enableFailoverToggle,
+    settingsData?.enableLocalProxy,
+  ]);
 
   useEffect(() => {
     const checkEnvOnSwitch = async () => {
@@ -1042,13 +1237,10 @@ function App() {
         <div
           className="fixed top-0 left-0 right-0 z-[70] flex items-center justify-end px-2"
           data-tauri-drag-region
-          style={{ WebkitAppRegion: "drag", height: dragBarHeight } as any}
+          style={{ ...DRAG_STYLE, height: dragBarHeight }}
         >
           {useAppWindowControls && (
-            <div
-              className="flex items-center gap-1"
-              style={{ WebkitAppRegion: "no-drag" } as any}
-            >
+            <div className="flex items-center gap-1" style={NO_DRAG_STYLE}>
               <Button
                 variant="ghost"
                 size="icon"
@@ -1116,22 +1308,21 @@ function App() {
       <header
         className="fixed z-50 w-full transition-all duration-300 bg-background/80 backdrop-blur-md"
         {...DRAG_REGION_ATTR}
-        style={
-          {
-            ...DRAG_REGION_STYLE,
-            top: dragBarHeight,
-            height: HEADER_HEIGHT,
-          } as any
-        }
+        style={{
+          ...DRAG_STYLE,
+          top: dragBarHeight,
+          height: HEADER_HEIGHT,
+        }}
       >
         <div
           className="flex h-full items-center justify-between gap-2 px-6"
           {...DRAG_REGION_ATTR}
-          style={{ ...DRAG_REGION_STYLE } as any}
+          style={DRAG_STYLE}
         >
           <div
+            ref={headerLeftRef}
             className="flex items-center gap-1"
-            style={{ WebkitAppRegion: "no-drag" } as any}
+            style={NO_DRAG_STYLE}
           >
             {currentView !== "providers" ? (
               <div className="flex items-center gap-2">
@@ -1227,14 +1418,22 @@ function App() {
             )}
           </div>
 
-          <div className="flex flex-1 min-w-0 items-center justify-end gap-1.5">
+          <div
+            ref={headerRightRef}
+            className="flex flex-1 min-w-0 items-center justify-end gap-1.5"
+          >
+            {authShell && (
+              <div className="flex min-w-0 shrink" style={NO_DRAG_STYLE}>
+                {authShell}
+              </div>
+            )}
             {currentView === "providers" &&
               activeApp !== "opencode" &&
               activeApp !== "openclaw" &&
               activeApp !== "hermes" && (
                 <div
                   className="flex shrink-0 items-center gap-1.5"
-                  style={{ WebkitAppRegion: "no-drag" } as any}
+                  style={NO_DRAG_STYLE}
                 >
                   {activeApp === "claude-desktop" ? (
                     <ClaudeDesktopRouteToggle />
@@ -1255,7 +1454,7 @@ function App() {
             >
               <div
                 className="flex shrink-0 items-center gap-1.5 ml-auto"
-                style={{ WebkitAppRegion: "no-drag" } as any}
+                style={NO_DRAG_STYLE}
               >
                 {currentView === "prompts" && (
                   <Button
@@ -1637,6 +1836,14 @@ function App() {
       <DeepLinkImportDialog />
       <FirstRunNoticeDialog />
     </div>
+  );
+}
+
+function App() {
+  return (
+    <CompanyAuthGate>
+      {({ shell }) => <AppContent authShell={shell} />}
+    </CompanyAuthGate>
   );
 }
 

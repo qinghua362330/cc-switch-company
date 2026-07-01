@@ -1,6 +1,7 @@
 import { http, HttpResponse } from "msw";
 import type { AppId } from "@/lib/api/types";
 import type { McpServer, Provider, Settings } from "@/types";
+import { companyAuthHandlers } from "./companyAuthHandlers";
 import {
   addProvider,
   deleteProvider,
@@ -27,41 +28,103 @@ import {
 
 const TAURI_ENDPOINT = "http://tauri.local";
 
-const withJson = async <T>(request: Request): Promise<T> => {
+type JsonRecord = Record<string, unknown>;
+type ProviderInput = Omit<Provider, "id"> & { id?: string };
+type SortUpdate = { id: string; sortIndex: number };
+type SessionDeleteItem = {
+  providerId: string;
+  sessionId: string;
+  sourcePath: string;
+};
+
+const isJsonRecord = (value: unknown): value is JsonRecord =>
+  Boolean(value) && typeof value === "object" && !Array.isArray(value);
+
+const withJson = async (request: Request): Promise<JsonRecord> => {
   try {
     const body = await request.text();
-    if (!body) return {} as T;
-    return JSON.parse(body) as T;
+    if (!body) return {};
+    const parsed: unknown = JSON.parse(body);
+    return isJsonRecord(parsed) ? parsed : {};
   } catch {
-    return {} as T;
+    return {};
   }
 };
 
-const success = <T>(payload: T) => HttpResponse.json(payload as any);
+const isAppId = (value: unknown): value is AppId =>
+  typeof value === "string" &&
+  [
+    "claude",
+    "claude-desktop",
+    "codex",
+    "gemini",
+    "opencode",
+    "openclaw",
+    "hermes",
+  ].some((appId) => appId === value);
+
+const isProviderInput = (value: unknown): value is ProviderInput =>
+  isJsonRecord(value) &&
+  (value.id === undefined || typeof value.id === "string") &&
+  typeof value.name === "string" &&
+  isJsonRecord(value.settingsConfig);
+
+const isProvider = (value: unknown): value is Provider =>
+  isProviderInput(value) && typeof value.id === "string";
+
+const isSortUpdate = (value: unknown): value is SortUpdate =>
+  isJsonRecord(value) &&
+  typeof value.id === "string" &&
+  typeof value.sortIndex === "number";
+
+const isSessionDeleteItem = (value: unknown): value is SessionDeleteItem =>
+  isJsonRecord(value) &&
+  typeof value.providerId === "string" &&
+  typeof value.sessionId === "string" &&
+  typeof value.sourcePath === "string";
+
+const isMcpServer = (value: unknown): value is McpServer =>
+  isJsonRecord(value) &&
+  typeof value.id === "string" &&
+  typeof value.name === "string" &&
+  isJsonRecord(value.server) &&
+  isJsonRecord(value.apps);
+
+const isSettingsPatch = (value: unknown): value is Partial<Settings> =>
+  isJsonRecord(value);
+
+const success = (payload: unknown): Response =>
+  new Response(JSON.stringify(payload) ?? "null", {
+    headers: { "Content-Type": "application/json" },
+  });
 
 export const handlers = [
   http.post(`${TAURI_ENDPOINT}/get_migration_result`, () => success(false)),
   http.post(`${TAURI_ENDPOINT}/get_skills_migration_result`, () =>
     success(null),
   ),
+  ...companyAuthHandlers,
   http.post(`${TAURI_ENDPOINT}/get_providers`, async ({ request }) => {
-    const { app } = await withJson<{ app: AppId }>(request);
+    const { app } = await withJson(request);
+    if (!isAppId(app)) return success({});
     return success(getProviders(app));
   }),
 
   http.post(`${TAURI_ENDPOINT}/get_current_provider`, async ({ request }) => {
-    const { app } = await withJson<{ app: AppId }>(request);
+    const { app } = await withJson(request);
+    if (!isAppId(app)) return success("");
     return success(getCurrentProviderId(app));
   }),
 
   http.post(
     `${TAURI_ENDPOINT}/update_providers_sort_order`,
     async ({ request }) => {
-      const { updates = [], app } = await withJson<{
-        updates: { id: string; sortIndex: number }[];
-        app: AppId;
-      }>(request);
-      updateSortOrder(app, updates);
+      const { updates, app } = await withJson(request);
+      if (!isAppId(app)) return success(false);
+      const safeUpdates = Array.isArray(updates)
+        ? updates.filter(isSortUpdate)
+        : [];
+      updateSortOrder(app, safeUpdates);
       return success(true);
     },
   ),
@@ -83,7 +146,10 @@ export const handlers = [
   http.post(`${TAURI_ENDPOINT}/scan_openclaw_config_health`, () => success([])),
 
   http.post(`${TAURI_ENDPOINT}/switch_provider`, async ({ request }) => {
-    const { id, app } = await withJson<{ id: string; app: AppId }>(request);
+    const { id, app } = await withJson(request);
+    if (!isAppId(app) || typeof id !== "string") {
+      return HttpResponse.json(false, { status: 404 });
+    }
     const providers = listProviders(app);
     if (!providers[id]) {
       return HttpResponse.json(false, { status: 404 });
@@ -93,10 +159,10 @@ export const handlers = [
   }),
 
   http.post(`${TAURI_ENDPOINT}/add_provider`, async ({ request }) => {
-    const { provider, app } = await withJson<{
-      provider: Provider & { id?: string };
-      app: AppId;
-    }>(request);
+    const { provider, app } = await withJson(request);
+    if (!isAppId(app) || !isProviderInput(provider)) {
+      return success(false);
+    }
 
     const newId = provider.id ?? `mock-${Date.now()}`;
     addProvider(app, { ...provider, id: newId });
@@ -104,16 +170,19 @@ export const handlers = [
   }),
 
   http.post(`${TAURI_ENDPOINT}/update_provider`, async ({ request }) => {
-    const { provider, app } = await withJson<{
-      provider: Provider;
-      app: AppId;
-    }>(request);
+    const { provider, app } = await withJson(request);
+    if (!isAppId(app) || !isProvider(provider)) {
+      return success(false);
+    }
     updateProvider(app, provider);
     return success(true);
   }),
 
   http.post(`${TAURI_ENDPOINT}/delete_provider`, async ({ request }) => {
-    const { id, app } = await withJson<{ id: string; app: AppId }>(request);
+    const { id, app } = await withJson(request);
+    if (!isAppId(app) || typeof id !== "string") {
+      return success(false);
+    }
     deleteProvider(app, id);
     return success(true);
   }),
@@ -128,33 +197,33 @@ export const handlers = [
   http.post(`${TAURI_ENDPOINT}/list_sessions`, () => success(listSessions())),
 
   http.post(`${TAURI_ENDPOINT}/get_session_messages`, async ({ request }) => {
-    const { providerId, sourcePath } = await withJson<{
-      providerId: string;
-      sourcePath: string;
-    }>(request);
+    const { providerId, sourcePath } = await withJson(request);
+    if (typeof providerId !== "string" || typeof sourcePath !== "string") {
+      return success([]);
+    }
     return success(getSessionMessages(providerId, sourcePath));
   }),
 
   http.post(`${TAURI_ENDPOINT}/delete_session`, async ({ request }) => {
-    const { providerId, sessionId, sourcePath } = await withJson<{
-      providerId: string;
-      sessionId: string;
-      sourcePath: string;
-    }>(request);
+    const { providerId, sessionId, sourcePath } = await withJson(request);
+    if (
+      typeof providerId !== "string" ||
+      typeof sessionId !== "string" ||
+      typeof sourcePath !== "string"
+    ) {
+      return success(false);
+    }
     return success(deleteSession(providerId, sessionId, sourcePath));
   }),
 
   http.post(`${TAURI_ENDPOINT}/delete_sessions`, async ({ request }) => {
-    const { items = [] } = await withJson<{
-      items?: {
-        providerId: string;
-        sessionId: string;
-        sourcePath: string;
-      }[];
-    }>(request);
+    const { items } = await withJson(request);
+    const safeItems = Array.isArray(items)
+      ? items.filter(isSessionDeleteItem)
+      : [];
 
     return success(
-      items.map((item) => ({
+      safeItems.map((item) => ({
         providerId: item.providerId,
         sessionId: item.sessionId,
         sourcePath: item.sourcePath,
@@ -169,7 +238,8 @@ export const handlers = [
 
   // MCP APIs
   http.post(`${TAURI_ENDPOINT}/get_mcp_config`, async ({ request }) => {
-    const { app } = await withJson<{ app: AppId }>(request);
+    const { app } = await withJson(request);
+    if (!isAppId(app)) return success({ configPath: "", servers: {} });
     return success(getMcpConfig(app));
   }),
 
@@ -177,11 +247,14 @@ export const handlers = [
   http.post(`${TAURI_ENDPOINT}/import_mcp_from_codex`, () => success(1)),
 
   http.post(`${TAURI_ENDPOINT}/set_mcp_enabled`, async ({ request }) => {
-    const { app, id, enabled } = await withJson<{
-      app: AppId;
-      id: string;
-      enabled: boolean;
-    }>(request);
+    const { app, id, enabled } = await withJson(request);
+    if (
+      !isAppId(app) ||
+      typeof id !== "string" ||
+      typeof enabled !== "boolean"
+    ) {
+      return success(false);
+    }
     setMcpServerEnabled(app, id, enabled);
     return success(true);
   }),
@@ -189,11 +262,10 @@ export const handlers = [
   http.post(
     `${TAURI_ENDPOINT}/upsert_mcp_server_in_config`,
     async ({ request }) => {
-      const { app, id, spec } = await withJson<{
-        app: AppId;
-        id: string;
-        spec: McpServer;
-      }>(request);
+      const { app, id, spec } = await withJson(request);
+      if (!isAppId(app) || typeof id !== "string" || !isMcpServer(spec)) {
+        return success(false);
+      }
       upsertMcpServer(app, id, spec);
       return success(true);
     },
@@ -202,7 +274,10 @@ export const handlers = [
   http.post(
     `${TAURI_ENDPOINT}/delete_mcp_server_in_config`,
     async ({ request }) => {
-      const { app, id } = await withJson<{ app: AppId; id: string }>(request);
+      const { app, id } = await withJson(request);
+      if (!isAppId(app) || typeof id !== "string") {
+        return success(false);
+      }
       deleteMcpServer(app, id);
       return success(true);
     },
@@ -215,7 +290,8 @@ export const handlers = [
   http.post(`${TAURI_ENDPOINT}/check_env_conflicts`, () => success([])),
 
   http.post(`${TAURI_ENDPOINT}/save_settings`, async ({ request }) => {
-    const { settings } = await withJson<{ settings: Settings }>(request);
+    const { settings } = await withJson(request);
+    if (!isSettingsPatch(settings)) return success(false);
     setSettings(settings);
     return success(true);
   }),
@@ -223,7 +299,10 @@ export const handlers = [
   http.post(
     `${TAURI_ENDPOINT}/set_app_config_dir_override`,
     async ({ request }) => {
-      const { path } = await withJson<{ path: string | null }>(request);
+      const { path } = await withJson(request);
+      if (path !== null && typeof path !== "string") {
+        return success(false);
+      }
       setAppConfigDirOverrideState(path ?? null);
       return success(true);
     },
@@ -236,7 +315,7 @@ export const handlers = [
   http.post(
     `${TAURI_ENDPOINT}/apply_claude_plugin_config`,
     async ({ request }) => {
-      const { official } = await withJson<{ official: boolean }>(request);
+      const { official } = await withJson(request);
       setSettings({ enableClaudePluginIntegration: !official });
       return success(true);
     },
@@ -251,7 +330,8 @@ export const handlers = [
   ),
 
   http.post(`${TAURI_ENDPOINT}/get_config_dir`, async ({ request }) => {
-    const { app } = await withJson<{ app: AppId }>(request);
+    const { app } = await withJson(request);
+    if (!isAppId(app)) return success("/default/codex");
     return success(app === "claude" ? "/default/claude" : "/default/codex");
   }),
 
@@ -260,21 +340,25 @@ export const handlers = [
   http.post(
     `${TAURI_ENDPOINT}/select_config_directory`,
     async ({ request }) => {
-      const { defaultPath, default_path } = await withJson<{
-        defaultPath?: string;
-        default_path?: string;
-      }>(request);
-      const initial = defaultPath ?? default_path;
+      const { defaultPath, default_path } = await withJson(request);
+      const initial =
+        typeof defaultPath === "string"
+          ? defaultPath
+          : typeof default_path === "string"
+            ? default_path
+            : undefined;
       return success(initial ? `${initial}/picked` : "/mock/selected-dir");
     },
   ),
 
   http.post(`${TAURI_ENDPOINT}/pick_directory`, async ({ request }) => {
-    const { defaultPath, default_path } = await withJson<{
-      defaultPath?: string;
-      default_path?: string;
-    }>(request);
-    const initial = defaultPath ?? default_path;
+    const { defaultPath, default_path } = await withJson(request);
+    const initial =
+      typeof defaultPath === "string"
+        ? defaultPath
+        : typeof default_path === "string"
+          ? default_path
+          : undefined;
     return success(initial ? `${initial}/picked` : "/mock/selected-dir");
   }),
 
@@ -285,7 +369,7 @@ export const handlers = [
   http.post(
     `${TAURI_ENDPOINT}/import_config_from_file`,
     async ({ request }) => {
-      const { filePath } = await withJson<{ filePath: string }>(request);
+      const { filePath } = await withJson(request);
       if (!filePath) {
         return success({ success: false, message: "Missing file" });
       }
@@ -295,7 +379,7 @@ export const handlers = [
   ),
 
   http.post(`${TAURI_ENDPOINT}/export_config_to_file`, async ({ request }) => {
-    const { filePath } = await withJson<{ filePath: string }>(request);
+    const { filePath } = await withJson(request);
     if (!filePath) {
       return success({ success: false, message: "Invalid destination" });
     }

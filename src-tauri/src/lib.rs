@@ -1,5 +1,6 @@
 mod app_config;
 mod app_store;
+pub mod auth_client;
 mod auto_launch;
 mod claude_desktop_config;
 mod claude_mcp;
@@ -599,6 +600,40 @@ pub fn run() {
                 Err(e) => log::warn!("✗ Failed to seed official providers: {e}"),
             }
 
+            match app_state.db.normalize_official_provider_display_names() {
+                Ok(count) if count > 0 => {
+                    log::info!("✓ Renamed {count} official provider(s) to unified display name");
+                }
+                Ok(_) => {}
+                Err(e) => log::warn!("✗ Failed to normalize official provider names: {e}"),
+            }
+
+            match crate::commands::normalize_company_codex_providers(&app_state) {
+                Ok(count) if count > 0 => {
+                    log::info!(
+                        "✓ Normalized {count} company Codex provider(s) to responses /v1 mode"
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => log::warn!("✗ Failed to normalize company Codex providers: {e}"),
+            }
+
+            if let Err(e) = crate::settings::ensure_codex_unified_session_history_default_enabled()
+            {
+                log::warn!("✗ Failed to enable unified Codex session history by default: {e}");
+            }
+            if let Err(e) = crate::settings::ensure_codex_preserve_official_auth_default_enabled() {
+                log::warn!("✗ Failed to preserve Codex official auth by default: {e}");
+            }
+
+            if crate::settings::unify_codex_session_history() {
+                match crate::services::provider::reapply_current_codex_official_live(&app_state) {
+                    Ok(true) => log::info!("✓ Applied unified Codex session history to live config"),
+                    Ok(false) => log::debug!("○ Unified Codex live config reapply skipped"),
+                    Err(e) => log::warn!("✗ Failed to apply unified Codex live config: {e}"),
+                }
+            }
+
             {
                 let db_for_codex_history_migration = app_state.db.clone();
                 tauri::async_runtime::spawn_blocking(move || {
@@ -989,6 +1024,19 @@ pub fn run() {
                 log::info!("✓ CodexOAuthManager initialized");
             }
 
+            {
+                use commands::CompanyAuthState;
+                use tokio::sync::RwLock;
+
+                let app_config_dir = crate::config::get_app_config_dir();
+                let company_auth_service =
+                    crate::auth_client::production_auth_service(&app_config_dir)?;
+                app.manage(CompanyAuthState(Arc::new(RwLock::new(
+                    company_auth_service,
+                ))));
+                log::info!("✓ CompanyAuthService initialized");
+            }
+
             // 初始化全局出站代理 HTTP 客户端
             {
                 let db = &app.state::<AppState>().db;
@@ -1226,6 +1274,8 @@ pub fn run() {
             commands::set_log_config,
             commands::restart_app,
             commands::install_update_and_restart,
+            commands::check_cc_switch_update_manifest,
+            commands::launch_cc_switch_update_installer,
             commands::check_app_update_available,
             commands::check_for_updates,
             commands::is_portable_mode,
@@ -1451,6 +1501,7 @@ pub fn run() {
             commands::scan_local_proxies,
             // Window theme control
             commands::set_window_theme,
+            commands::open_codex_app,
             // Generic managed auth commands
             commands::auth_start_login,
             commands::auth_poll_for_account,
@@ -1459,6 +1510,12 @@ pub fn run() {
             commands::auth_remove_account,
             commands::auth_set_default_account,
             commands::auth_logout,
+            commands::company_auth_get_state,
+            commands::company_auth_login_with_ticket,
+            commands::company_auth_refresh_catalog,
+            commands::company_auth_sync_providers,
+            commands::company_auth_logout,
+            commands::company_auth_start_feishu_login,
             // Copilot OAuth commands (multi-account support)
             commands::copilot_start_device_flow,
             commands::copilot_poll_for_auth,
@@ -2011,7 +2068,7 @@ fn classify_exit_request(code: Option<i32>) -> ExitRequestAction {
 // ============================================================
 
 fn window_state_flags() -> StateFlags {
-    StateFlags::POSITION | StateFlags::SIZE | StateFlags::MAXIMIZED
+    StateFlags::MAXIMIZED
 }
 
 /// 当前应用的退出路径会拦截 `ExitRequested` 并最终直接 `std::process::exit(0)`，
