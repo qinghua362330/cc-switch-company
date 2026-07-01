@@ -19,8 +19,10 @@ use std::os::windows::process::CommandExt;
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-const CC_SWITCH_UPDATE_MANIFEST_URL: &str = "https://leharrt.com/cc-switch/latest.json";
-const CC_SWITCH_INSTALLER_URL: &str = "https://leharrt.com/cc-switch/install.sh";
+const CC_SWITCH_UPDATE_MANIFEST_URL: &str =
+    "https://github.com/qinghua362330/cc-switch-company/releases/latest/download/latest-company.json";
+const CC_SWITCH_INSTALLER_URL: &str =
+    "https://github.com/qinghua362330/cc-switch-company/releases/latest/download/install.sh";
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CcSwitchUpdateManifest {
