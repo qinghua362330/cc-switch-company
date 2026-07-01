@@ -117,21 +117,25 @@ jobs:
             exit 1
           fi
 
-          key_path="$RUNNER_TEMP/tauri-signing.key"
+          extract_key_line() {
+            awk 'NF && $0 !~ /^untrusted comment:/ { print; exit }'
+          }
+
           if printf '%s' "$RAW_PRIVATE_KEY" | grep -q '^untrusted comment:'; then
-            printf '%s\n' "$RAW_PRIVATE_KEY" > "$key_path"
+            key_line="$(printf '%s\n' "$RAW_PRIVATE_KEY" | tr -d '\r' | extract_key_line)"
           elif decoded="$(printf '%s' "$RAW_PRIVATE_KEY" | (base64 --decode 2>/dev/null || base64 -D 2>/dev/null))" \
             && printf '%s' "$decoded" | grep -q '^untrusted comment:'; then
-            printf '%s\n' "$decoded" > "$key_path"
+            key_line="$(printf '%s\n' "$decoded" | tr -d '\r' | extract_key_line)"
           else
-            printf 'untrusted comment: tauri signing key\n%s\n' "$(printf '%s' "$RAW_PRIVATE_KEY" | tr -d '\r\n')" > "$key_path"
+            key_line="$(printf '%s' "$RAW_PRIVATE_KEY" | tr -d '\r\n')"
           fi
 
-          {
-            echo "TAURI_SIGNING_PRIVATE_KEY<<__TAURI_KEY__"
-            cat "$key_path"
-            echo "__TAURI_KEY__"
-          } >> "$GITHUB_ENV"
+          if [ -z "${key_line:-}" ]; then
+            echo "TAURI_SIGNING_PRIVATE_KEY did not contain a private key line." >&2
+            exit 1
+          fi
+
+          echo "TAURI_SIGNING_PRIVATE_KEY=$key_line" >> "$GITHUB_ENV"
 
           if [ -n "${PRIVATE_KEY_PASSWORD:-}" ]; then
             echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$PRIVATE_KEY_PASSWORD" >> "$GITHUB_ENV"
