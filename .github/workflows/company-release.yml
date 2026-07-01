@@ -10,7 +10,7 @@ on:
       prerelease:
         description: "Mark GitHub release as prerelease"
         required: true
-        default: true
+        default: false
         type: boolean
   push:
     tags:
@@ -265,6 +265,9 @@ jobs:
     runs-on: ubuntu-22.04
     needs: build
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Resolve release tag
         id: meta
         shell: bash
@@ -281,6 +284,14 @@ jobs:
           path: release-assets
           merge-multiple: true
 
+      - name: Add GitHub installer scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp release/cc-switch-update/install.sh release-assets/install.sh
+          cp release/cc-switch-update/install.ps1 release-assets/install.ps1
+          chmod +x release-assets/install.sh
+
       - name: Generate latest-company.json
         shell: bash
         env:
@@ -293,8 +304,10 @@ jobs:
           pub_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           win_msi="$(find release-assets -maxdepth 1 -name '*Windows-company-x64.msi' -type f | head -1)"
           win_sig="$(cat "$win_msi.sig")"
+          win_sha="$(sha256sum "$win_msi" | awk '{print $1}')"
           mac_tgz="$(find release-assets -maxdepth 1 -name '*macOS-company-universal.tar.gz' -type f | head -1)"
           mac_sig="$(cat "$mac_tgz.sig")"
+          mac_sha="$(sha256sum "$mac_tgz" | awk '{print $1}')"
           win_name="$(basename "$win_msi")"
           mac_name="$(basename "$mac_tgz")"
           cat > release-assets/latest-company.json <<EOF_JSON
@@ -315,6 +328,23 @@ jobs:
                 "signature": "$mac_sig",
                 "url": "$base_url/$mac_name"
               }
+            },
+            "installers": {
+              "windows-x86_64": {
+                "kind": "msi",
+                "sha256": "$win_sha",
+                "url": "$base_url/$win_name"
+              },
+              "darwin-aarch64": {
+                "kind": "tar.gz",
+                "sha256": "$mac_sha",
+                "url": "$base_url/$mac_name"
+              },
+              "darwin-x86_64": {
+                "kind": "tar.gz",
+                "sha256": "$mac_sha",
+                "url": "$base_url/$mac_name"
+              }
             }
           }
           EOF_JSON
@@ -324,7 +354,7 @@ jobs:
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
           name: CC Switch Company ${{ steps.meta.outputs.tag }}
-          prerelease: ${{ github.event.inputs.prerelease || true }}
+          prerelease: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease || false }}
           body: |
             ## CC Switch Company ${{ steps.meta.outputs.tag }}
 
@@ -333,6 +363,8 @@ jobs:
             - Windows x64: `CC-Switch-${{ steps.meta.outputs.tag }}-Windows-company-x64.msi`
             - Windows x64 Portable: `CC-Switch-${{ steps.meta.outputs.tag }}-Windows-company-x64-Portable.zip`
             - macOS Universal: `CC-Switch-${{ steps.meta.outputs.tag }}-macOS-company-universal.zip`
+            - macOS one-line installer: `install.sh`
+            - Windows one-line installer: `install.ps1`
 
             `latest-company.json` 用于公司版自动更新。
           files: release-assets/*
