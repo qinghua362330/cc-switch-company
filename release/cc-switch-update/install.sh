@@ -59,6 +59,14 @@ metadata_url() {
   fi
 }
 
+release_api_url() {
+  if [[ -n "${RELEASE_TAG}" ]]; then
+    printf 'https://api.github.com/repos/%s/releases/tags/%s\n' "${RELEASE_REPO}" "${RELEASE_TAG}"
+  else
+    printf 'https://api.github.com/repos/%s/releases/latest\n' "${RELEASE_REPO}"
+  fi
+}
+
 json_get() {
   local file="$1"
   local path="$2"
@@ -104,12 +112,153 @@ PY
   fail "系统缺少 python3/plutil，无法解析 GitHub 版本信息"
 }
 
+json_keys() {
+  local file="$1"
+  local path="$2"
+
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$file" "$path" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as fh:
+    value = json.load(fh)
+
+for part in sys.argv[2].split("."):
+    if not isinstance(value, dict) or part not in value:
+        sys.exit(1)
+    value = value[part]
+
+if not isinstance(value, dict):
+    sys.exit(1)
+print(", ".join(sorted(value.keys())))
+PY
+    return
+  fi
+
+  if command -v ruby >/dev/null 2>&1; then
+    ruby -rjson -e '
+      value = JSON.parse(File.read(ARGV[0]))
+      ARGV[1].split(".").each do |part|
+        exit 1 unless value.is_a?(Hash) && value.key?(part)
+        value = value[part]
+      end
+      exit 1 unless value.is_a?(Hash)
+      puts value.keys.sort.join(", ")
+    ' "$file" "$path"
+  fi
+}
+
+try_metadata_package() {
+  local metadata="$1"
+  local key="$2"
+  local candidate_url
+  local candidate_sha
+
+  candidate_url="$(json_get "$metadata" "installers.${key}.url" 2>/dev/null || true)"
+  candidate_sha="$(json_get "$metadata" "installers.${key}.sha256" 2>/dev/null || true)"
+
+  if [[ -z "$candidate_url" ]]; then
+    candidate_url="$(json_get "$metadata" "platforms.${key}.url" 2>/dev/null || true)"
+    candidate_sha=""
+  fi
+
+  if [[ -z "$candidate_url" ]]; then
+    return 1
+  fi
+
+  DOWNLOAD_URL="${DOWNLOAD_URL:-$candidate_url}"
+  EXPECTED_SHA256="${EXPECTED_SHA256:-$candidate_sha}"
+  return 0
+}
+
+find_macos_asset_url() {
+  local release_json="$1"
+
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$release_json" <<'PY'
+import json
+import re
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as fh:
+    release = json.load(fh)
+
+assets = release.get("assets") or []
+patterns = [
+    r"macOS-company-universal\.tar\.gz$",
+    r"macOS-company-universal\.zip$",
+    r"macOS.*universal.*\.tar\.gz$",
+    r"macOS.*universal.*\.zip$",
+]
+
+for pattern in patterns:
+    rx = re.compile(pattern, re.IGNORECASE)
+    for asset in assets:
+        name = asset.get("name") or ""
+        url = asset.get("browser_download_url") or ""
+        if url and rx.search(name):
+            print(url)
+            sys.exit(0)
+
+sys.exit(1)
+PY
+    return
+  fi
+
+  if command -v ruby >/dev/null 2>&1; then
+    ruby -rjson -e '
+      release = JSON.parse(File.read(ARGV[0]))
+      assets = release["assets"] || []
+      patterns = [
+        /macOS-company-universal\.tar\.gz$/i,
+        /macOS-company-universal\.zip$/i,
+        /macOS.*universal.*\.tar\.gz$/i,
+        /macOS.*universal.*\.zip$/i,
+      ]
+      patterns.each do |pattern|
+        assets.each do |asset|
+          name = asset["name"] || ""
+          url = asset["browser_download_url"] || ""
+          if !url.empty? && name.match?(pattern)
+            puts url
+            exit 0
+          end
+        end
+      end
+      exit 1
+    ' "$release_json"
+  fi
+}
+
+resolve_from_release_assets() {
+  local release_json="${WORKDIR}/release.json"
+  local api
+  local url
+
+  api="$(release_api_url)"
+  say "未在 latest-company.json 找到匹配架构，正在尝试读取 GitHub Release 资产：${api}"
+  curl -fsSL --retry 3 --connect-timeout 20 \
+    -H "Cache-Control: no-cache" \
+    -H "Pragma: no-cache" \
+    -o "$release_json" "${api}?cache_bust=$(date +%s)" \
+    || return 1
+
+  url="$(find_macos_asset_url "$release_json" 2>/dev/null || true)"
+  [[ -n "$url" ]] || return 1
+
+  DOWNLOAD_URL="${DOWNLOAD_URL:-$url}"
+  EXPECTED_SHA256="${EXPECTED_SHA256:-}"
+  say "已找到 macOS Universal 安装包。"
+  return 0
+}
+
 resolve_from_metadata() {
   local arch="$1"
   local metadata="${WORKDIR}/latest-company.json"
-  local url
-  local sha
   local source
+  local key
+  local -a candidates
 
   source="$(metadata_url)"
   say "正在读取 GitHub 版本信息：${source}"
@@ -119,26 +268,31 @@ resolve_from_metadata() {
     -o "$metadata" "${source}?cache_bust=$(date +%s)" \
     || fail "无法读取 GitHub Release 版本信息"
 
-  url="$(json_get "$metadata" "installers.darwin-${arch}.url" 2>/dev/null || true)"
-  sha="$(json_get "$metadata" "installers.darwin-${arch}.sha256" 2>/dev/null || true)"
-
-  if [[ -z "$url" ]]; then
-    url="$(json_get "$metadata" "platforms.darwin-${arch}.url" 2>/dev/null || true)"
+  candidates=("darwin-${arch}" "darwin-universal" "macos-universal" "macOS-universal")
+  if [[ "$arch" == "x86_64" ]]; then
+    candidates+=("darwin-aarch64")
+  else
+    candidates+=("darwin-x86_64")
   fi
 
-  if [[ -z "$url" && "$arch" == "x86_64" ]]; then
-    say "没有找到 darwin-x86_64 独立条目，尝试使用 macOS Universal 包..."
-    url="$(json_get "$metadata" "installers.darwin-aarch64.url" 2>/dev/null || true)"
-    sha="$(json_get "$metadata" "installers.darwin-aarch64.sha256" 2>/dev/null || true)"
-    if [[ -z "$url" ]]; then
-      url="$(json_get "$metadata" "platforms.darwin-aarch64.url" 2>/dev/null || true)"
+  for key in "${candidates[@]}"; do
+    if try_metadata_package "$metadata" "$key"; then
+      if [[ "$key" != "darwin-${arch}" ]]; then
+        say "没有找到 darwin-${arch} 独立条目，已使用 ${key} 安装包。"
+      fi
+      return
     fi
+  done
+
+  if resolve_from_release_assets; then
+    return
   fi
 
-  [[ -n "$url" ]] || fail "latest-company.json 中没有 darwin-${arch} 安装包"
-
-  DOWNLOAD_URL="${DOWNLOAD_URL:-$url}"
-  EXPECTED_SHA256="${EXPECTED_SHA256:-$sha}"
+  local installer_keys
+  local platform_keys
+  installer_keys="$(json_keys "$metadata" "installers" 2>/dev/null || true)"
+  platform_keys="$(json_keys "$metadata" "platforms" 2>/dev/null || true)"
+  fail "latest-company.json 中没有 darwin-${arch} 安装包。installers 可用项：${installer_keys:-无}; platforms 可用项：${platform_keys:-无}"
 }
 
 copy_app() {

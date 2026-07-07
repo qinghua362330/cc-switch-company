@@ -337,6 +337,10 @@ jobs:
               "darwin-x86_64": {
                 "signature": "$mac_sig",
                 "url": "$base_url/$mac_name"
+              },
+              "darwin-universal": {
+                "signature": "$mac_sig",
+                "url": "$base_url/$mac_name"
               }
             },
             "installers": {
@@ -351,6 +355,11 @@ jobs:
                 "url": "$base_url/$mac_name"
               },
               "darwin-x86_64": {
+                "kind": "tar.gz",
+                "sha256": "$mac_sha",
+                "url": "$base_url/$mac_name"
+              },
+              "darwin-universal": {
                 "kind": "tar.gz",
                 "sha256": "$mac_sha",
                 "url": "$base_url/$mac_name"
