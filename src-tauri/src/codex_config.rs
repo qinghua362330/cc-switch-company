@@ -701,6 +701,46 @@ fn codex_upstream_model_capabilities(slug: &str) -> Option<Value> {
         .cloned()
 }
 
+/// 上游能力表的来源，与模板加载走同一条回退链：
+///
+/// ① `models_cache.json` —— Codex 连过 OpenAI 后落盘，逐模型准确，且反映该
+///    账号真实可用的档位（不同订阅看到的梯子可能不同）。
+/// ② `codex debug models --bundled` —— Codex 自带的编译期模型表。装了 Codex
+///    但还没登录/联网过的机器靠它兜底，避免全新环境退回单模板的四档。
+///
+/// 两者都拿不到时返回 `None`，调用方保持模板克隆的既有行为。
+fn read_codex_upstream_models_catalog() -> Option<Value> {
+    if let Some(catalog) = read_codex_upstream_models_cache() {
+        return Some(catalog);
+    }
+    read_codex_bundled_models_catalog()
+}
+
+/// 跑 `codex debug models --bundled` 取全量模型表。
+///
+/// 与 `load_codex_model_template_from_bundled` 用同一条命令，区别是这里要整张
+/// 表来按 slug 查能力，而不是只挑出模板那一条。
+fn read_codex_bundled_models_catalog() -> Option<Value> {
+    for candidate in codex_cli_candidates() {
+        let Ok(output) = codex_bundled_models_command(&candidate).output() else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+        if let Ok(catalog) = serde_json::from_slice::<Value>(&output.stdout) {
+            if catalog
+                .get("models")
+                .and_then(Value::as_array)
+                .is_some_and(|models| !models.is_empty())
+            {
+                return Some(catalog);
+            }
+        }
+    }
+    None
+}
+
 /// 读取并缓存 `models_cache.json`。
 ///
 /// 每次切换供应商都会为每个模型生成一条 catalog entry，逐条读盘会放大 IO；
@@ -709,13 +749,13 @@ fn codex_upstream_model_capabilities(slug: &str) -> Option<Value> {
 fn load_codex_upstream_models_cache() -> Option<Value> {
     static UPSTREAM_MODELS_CACHE: OnceCell<Option<Value>> = OnceCell::new();
     UPSTREAM_MODELS_CACHE
-        .get_or_init(read_codex_upstream_models_cache)
+        .get_or_init(read_codex_upstream_models_catalog)
         .clone()
 }
 
 #[cfg(test)]
 fn load_codex_upstream_models_cache() -> Option<Value> {
-    read_codex_upstream_models_cache()
+    read_codex_upstream_models_catalog()
 }
 
 fn read_codex_upstream_models_cache() -> Option<Value> {
