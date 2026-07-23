@@ -421,6 +421,11 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
 
   const handleOpenReleaseNotes = useCallback(async () => {
     try {
+      if (updateInfo?.releaseNotesUrl) {
+        await settingsApi.openExternal(updateInfo.releaseNotesUrl);
+        return;
+      }
+
       const targetVersion = updateInfo?.availableVersion ?? version ?? "";
       const displayVersion = targetVersion.startsWith("v")
         ? targetVersion
@@ -446,6 +451,25 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
 
   const handleCheckUpdate = useCallback(async () => {
     if (hasUpdate) {
+      if (updateInfo?.source === "company" || updateInfo?.installerUrl) {
+        setIsDownloading(true);
+        try {
+          resetDismiss();
+          await settingsApi.launchCcSwitchUpdateInstaller(
+            updateInfo.installerUrl,
+          );
+        } catch (error) {
+          console.error("[AboutSection] Failed to launch updater", error);
+          toast.error(t("settings.updateFailed"), {
+            description: extractErrorMessage(error) || undefined,
+            closeButton: true,
+          });
+        } finally {
+          setIsDownloading(false);
+        }
+        return;
+      }
+
       if (isPortable) {
         try {
           await settingsApi.checkUpdates();
@@ -491,7 +515,7 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
       console.error("[AboutSection] Check update failed", error);
       toast.error(t("settings.checkUpdateFailed"));
     }
-  }, [checkUpdate, hasUpdate, isPortable, resetDismiss, t]);
+  }, [checkUpdate, hasUpdate, isPortable, resetDismiss, t, updateInfo]);
 
   const handleCopyInstallCommands = useCallback(async () => {
     try {

@@ -149,6 +149,10 @@ export const providersApi = {
     });
   },
 
+  async openCodexApp(): Promise<boolean> {
+    return await invoke("open_codex_app");
+  },
+
   /**
    * 从 OpenCode live 配置导入供应商到数据库
    * OpenCode 特有功能：由于累加模式，用户可能已在 opencode.json 中配置供应商

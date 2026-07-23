@@ -57,6 +57,10 @@ export const settingsApi = {
     return await invoke("install_update_and_restart");
   },
 
+  async launchCcSwitchUpdateInstaller(installerUrl?: string): Promise<boolean> {
+    return await invoke("launch_cc_switch_update_installer", { installerUrl });
+  },
+
   async checkUpdates(): Promise<void> {
     await invoke("check_for_updates");
   },

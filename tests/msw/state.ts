@@ -7,6 +7,8 @@ import type {
   Settings,
 } from "@/types";
 import { deepClone } from "@/utils/deepClone";
+import { resetCompanyAuthState } from "./companyAuthState";
+export { getCompanyAuthState, setCompanyAuthState } from "./companyAuthState";
 
 type ProvidersByApp = Record<AppId, Record<string, Provider>>;
 type CurrentProviderState = Record<AppId, string>;
@@ -218,6 +220,7 @@ export const resetProviderState = () => {
     language: "zh",
   };
   appConfigDirOverride = null;
+  resetCompanyAuthState();
   mcpConfigs = {
     claude: {
       sample: {

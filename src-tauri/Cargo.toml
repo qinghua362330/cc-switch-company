@@ -39,7 +39,7 @@ tauri-plugin-window-state = "2"
 dirs = "5.0"
 toml = "0.8"
 toml_edit = "0.22"
-reqwest = { version = "0.12", features = ["rustls-tls", "json", "stream", "socks"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "socks", "charset", "http2", "system-proxy", "macos-system-configuration"] }
 arboard = "3.6"
 flate2 = "1"
 brotli = "7"
@@ -53,13 +53,13 @@ tower = "0.4"
 tower-http = { version = "0.5", features = ["cors"] }
 hyper = { version = "1.0", features = ["full"] }
 hyper-util = { version = "0.1", features = ["tokio", "http1", "client-legacy"] }
-hyper-rustls = { version = "0.27", features = ["http1", "tls12", "ring", "webpki-tokio"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "tls12", "ring", "webpki-tokio"] }
 http = "1"
 http-body = "1"
 http-body-util = "0.1"
 httparse = "1"
-tokio-rustls = "0.26"
-rustls = "0.23"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
 webpki-roots = "0.26"
 rustls-native-certs = "0.8"
 regex = "1.10"
@@ -98,6 +98,7 @@ rquickjs = { version = "0.8", features = ["bindgen"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.5"
 objc2-app-kit = { version = "0.2", features = ["NSColor"] }
+security-framework = "3.7.0"
 
 # Optimize release binary size to help reduce AppImage footprint
 [profile.release]

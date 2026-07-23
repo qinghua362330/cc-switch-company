@@ -233,6 +233,26 @@ export function useProviderActions(
       try {
         const result = await switchProviderMutation.mutateAsync(provider.id);
         await syncClaudePlugin(provider);
+        const shouldAutoLaunchCodex = activeApp === "codex";
+        let launchedCodex = false;
+
+        if (shouldAutoLaunchCodex) {
+          try {
+            await providersApi.openCodexApp();
+            launchedCodex = true;
+          } catch (error) {
+            console.error(
+              "[ProviderActions] Failed to auto launch Codex app",
+              error,
+            );
+            const detail = extractErrorMessage(error);
+            toast.error(
+              t("provider.codexAppOpenFailed", {
+                defaultValue: "重启 Codex 应用失败",
+              }) + (detail ? `: ${detail}` : ""),
+            );
+          }
+        }
 
         // Show backfill warning if present
         if (result?.warnings?.length) {
@@ -245,8 +265,14 @@ export function useProviderActions(
           );
         }
 
-        // 若已弹过 proxyRequired 警告则不再弹 success
-        if (!proxyRequiredReason) {
+        if (launchedCodex) {
+          toast.success(
+            t("notifications.codexSwitchedAndLaunched", {
+              defaultValue: "已切换并重启 Codex",
+            }),
+            { closeButton: true },
+          );
+        } else if (!proxyRequiredReason) {
           let messageKey = "notifications.switchSuccess";
           let defaultMessage = "切换成功！";
           if (activeApp === "codex") {

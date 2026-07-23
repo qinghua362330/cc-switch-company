@@ -44,6 +44,11 @@ fn lock_codex_official_history_op() -> std::sync::MutexGuard<'static, ()> {
 /// Codex 内建默认 provider id：config.toml 没有 `model_provider` 键时会话归入此桶。
 /// 官方订阅（ChatGPT OAuth / OpenAI API key）的历史会话都记录这个 id。
 const OFFICIAL_OPENAI_CODEX_MODEL_PROVIDER_ID: &str = "openai";
+/// Old `https://leharrt.com/codex-switch.sh` wrote the company proxy as this
+/// provider id and rewrote every Codex history record to match the active mode.
+/// CCS uses the shared `custom` bucket, so old-script users need this id folded
+/// back into the unified bucket even after the one-time migration marker exists.
+const LEGACY_CODEX_SWITCH_PROXY_PROVIDER_ID: &str = "hellotalk";
 const LEGACY_CC_SWITCH_CODEX_MODEL_PROVIDER_ID: &str = "ccswitch";
 // If a Codex preset ever used a temporary routing key, keep that old key here
 // so local history can be bucketed under the current custom provider id.
@@ -214,12 +219,6 @@ pub fn maybe_migrate_codex_official_history_to_unified_bucket(
     // marker 绑定迁移时的 Codex 目录：切换 codex_config_dir 后旧 marker 不再
     // 挡住新目录的迁移（迁移幂等，重跑无害）。
     let codex_dir_key = canonical_dir_string(&codex_dir);
-    if crate::settings::is_codex_official_history_unify_migrated_for_dir(&codex_dir_key) {
-        return Ok(CodexHistoryProviderBucketMigrationOutcome {
-            skipped_reason: Some("already_migrated".to_string()),
-            ..Default::default()
-        });
-    }
     // live 必须已实际路由到共享 custom 桶才允许迁移：官方配置的注入可能被拒
     // （已有显式 model_provider / 形态冲突的 custom 表，见
     // `inject_codex_unified_session_bucket`），代理接管期间的 live 也不带统一
@@ -233,8 +232,7 @@ pub fn maybe_migrate_codex_official_history_to_unified_bucket(
         });
     }
 
-    let source_provider_ids: BTreeSet<String> =
-        std::iter::once(OFFICIAL_OPENAI_CODEX_MODEL_PROVIDER_ID.to_string()).collect();
+    let source_provider_ids = unified_history_compat_source_provider_ids();
     let backup_root = migration_backup_root(OFFICIAL_UNIFY_MIGRATION_NAME);
     let migrated_jsonl_files =
         migrate_codex_jsonl_files(&codex_dir, &source_provider_ids, &backup_root)?;
@@ -242,6 +240,22 @@ pub fn maybe_migrate_codex_official_history_to_unified_bucket(
         migrate_codex_state_dbs(&codex_dir, &source_provider_ids, &backup_root)?;
     // 备份代际记录来源目录，restore 据此只取当前目录的账本。
     write_backup_generation_meta(&backup_root, &codex_dir_key)?;
+
+    if crate::settings::is_codex_official_history_unify_migrated_for_dir(&codex_dir_key) {
+        if migrated_jsonl_files == 0 && migrated_state_rows == 0 {
+            return Ok(CodexHistoryProviderBucketMigrationOutcome {
+                skipped_reason: Some("already_migrated".to_string()),
+                ..Default::default()
+            });
+        }
+
+        return Ok(CodexHistoryProviderBucketMigrationOutcome {
+            source_provider_ids: source_provider_ids.into_iter().collect(),
+            migrated_jsonl_files,
+            migrated_state_rows,
+            skipped_reason: None,
+        });
+    }
 
     let outcome = CodexHistoryProviderBucketMigrationOutcome {
         source_provider_ids: source_provider_ids.into_iter().collect(),
@@ -270,6 +284,16 @@ pub fn maybe_migrate_codex_official_history_to_unified_bucket(
     }
 
     Ok(outcome)
+}
+
+fn unified_history_compat_source_provider_ids() -> BTreeSet<String> {
+    [
+        OFFICIAL_OPENAI_CODEX_MODEL_PROVIDER_ID,
+        LEGACY_CODEX_SWITCH_PROXY_PROVIDER_ID,
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
 }
 
 /// live config.toml 是否路由到共享 custom 桶（会话分桶只看这个实态：
@@ -1673,7 +1697,7 @@ base_url = "https://proxy.example/v1"
         let backup_root = dir.path().join("backup");
         fs::create_dir_all(&codex_dir).expect("create codex dir");
 
-        let source_provider_ids = source_ids(&[OFFICIAL_OPENAI_CODEX_MODEL_PROVIDER_ID]);
+        let source_provider_ids = unified_history_compat_source_provider_ids();
 
         let session_dir = codex_dir.join("sessions/2026/06/12");
         fs::create_dir_all(&session_dir).expect("create session dir");
@@ -1684,6 +1708,7 @@ base_url = "https://proxy.example/v1"
                 "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s1\",\"model_provider\":\"openai\"}}\n",
                 "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s2\",\"model_provider\":\"custom\"}}\n",
                 "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s3\",\"model_provider\":\"my-private-relay\"}}\n",
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s4\",\"model_provider\":\"hellotalk\"}}\n",
                 "{\"type\":\"response_item\",\"payload\":{\"text\":\"openai\"}}\n",
             ),
         )
@@ -1698,9 +1723,10 @@ base_url = "https://proxy.example/v1"
             session_text
                 .matches("\"model_provider\":\"custom\"")
                 .count(),
-            2
+            3
         );
         assert!(!session_text.contains("\"model_provider\":\"openai\""));
+        assert!(!session_text.contains("\"model_provider\":\"hellotalk\""));
         assert!(session_text.contains("\"model_provider\":\"my-private-relay\""));
         assert!(
             session_text.contains("{\"type\":\"response_item\",\"payload\":{\"text\":\"openai\"}}")
@@ -1723,6 +1749,7 @@ base_url = "https://proxy.example/v1"
             );
             INSERT INTO threads (id, model_provider) VALUES
                 ('openai-thread', 'openai'),
+                ('hellotalk-thread', 'hellotalk'),
                 ('custom-thread', 'custom'),
                 ('manual-thread', 'my-private-relay');",
         )
@@ -1736,7 +1763,7 @@ base_url = "https://proxy.example/v1"
             &backup_root,
         )
         .expect("migrate state db");
-        assert_eq!(migrated_state_rows, 1);
+        assert_eq!(migrated_state_rows, 2);
 
         let conn = Connection::open(&state_db_path).expect("reopen state db");
         let count_provider = |provider_id: &str| -> i64 {
@@ -1747,8 +1774,9 @@ base_url = "https://proxy.example/v1"
             )
             .expect("count provider")
         };
-        assert_eq!(count_provider("custom"), 2);
+        assert_eq!(count_provider("custom"), 3);
         assert_eq!(count_provider("openai"), 0);
+        assert_eq!(count_provider("hellotalk"), 0);
         assert_eq!(count_provider("my-private-relay"), 1);
     }
 

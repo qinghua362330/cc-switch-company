@@ -14,6 +14,7 @@ GEMINI.md
 /.codex
 /.gemini
 /.cc-switch
+/.omo
 /.idea
 /.vscode
 vitest-report.json
@@ -28,5 +29,8 @@ flatpak-repo/
 copilot-api
 .history
 CODEBUDDY.md
-.github
+.github/*
+!.github/workflows/
+!.github/workflows/*.yml
+!.github/workflows/*.yaml
 mainWindow.js

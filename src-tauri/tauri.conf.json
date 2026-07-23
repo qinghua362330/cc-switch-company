@@ -15,10 +15,10 @@
         "label": "main",
         "title": "",
         "titleBarStyle": "Overlay",
-        "width": 1000,
-        "height": 650,
-        "minWidth": 900,
-        "minHeight": 600,
+        "width": 1240,
+        "height": 620,
+        "minWidth": 980,
+        "minHeight": 540,
         "visible": false,
         "resizable": true,
         "fullscreen": false,
@@ -60,9 +60,9 @@
       }
     },
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEM4MDI4QzlBNTczOTI4RTMKUldUaktEbFhtb3dDeUM5US9kT0FmdGR5Ti9vQzcwa2dTMlpibDVDUmQ2M0VGTzVOWnd0SGpFVlEK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEUyOTg2RUI4Q0U4NjU3RUMKUldUc1Y0Yk91RzZZNGlIY2ZBTnQwVmNIS0lDMnBMRGtkbllSc0ZOQ0MwSzlOd2QxRGEvSzB4ZzEK",
       "endpoints": [
-        "https://github.com/farion1231/cc-switch/releases/latest/download/latest.json"
+        "https://github.com/qinghua362330/cc-switch-company/releases/latest/download/latest-company.json"
       ]
     }
   }

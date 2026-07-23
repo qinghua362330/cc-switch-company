@@ -56,6 +56,38 @@ vi.mock("@tauri-apps/api/event", () => ({
   },
 }));
 
+vi.mock("@tauri-apps/api/window", () => ({
+  LogicalSize: class LogicalSize {
+    constructor(
+      public width: number,
+      public height: number,
+    ) {}
+  },
+  currentMonitor: async () => ({
+    name: "Mock Monitor",
+    scaleFactor: 1,
+    size: { width: 1440, height: 900 },
+    position: { x: 0, y: 0 },
+    workArea: {
+      position: { x: 0, y: 0 },
+      size: { width: 1440, height: 900 },
+    },
+  }),
+  getCurrentWindow: () => ({
+    isMaximized: async () => false,
+    isFullscreen: async () => false,
+    scaleFactor: async () => 1,
+    innerSize: async () => ({ width: 1240, height: 620 }),
+    onResized: async () => () => {},
+    setDecorations: async () => {},
+    setMinSize: async () => {},
+    setSize: async () => {},
+    minimize: async () => {},
+    toggleMaximize: async () => {},
+    close: async () => {},
+  }),
+}));
+
 // Ensure the MSW server is referenced so tree shaking doesn't remove imports
 void server;
 
