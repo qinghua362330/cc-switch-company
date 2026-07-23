@@ -210,10 +210,22 @@ fn company_codex_settings(entry: &CatalogEntry, login: &LoginResponse) -> Value 
         .models
         .iter()
         .map(|model| {
-            json!({
+            let mut row = json!({
                 "model": model,
                 "displayName": model
-            })
+            });
+            // 服务端声明了该模型的能力就原样带上，供生成 Codex catalog 时使用。
+            // 号池支持什么由服务端说了算，不再依赖使用者个人账号的本机缓存。
+            if let Some(caps) = entry
+                .model_capabilities
+                .as_ref()
+                .and_then(|caps| caps.get(model))
+            {
+                if let Some(obj) = row.as_object_mut() {
+                    obj.insert("capabilities".to_string(), caps.clone());
+                }
+            }
+            row
         })
         .collect();
     let config = format!(

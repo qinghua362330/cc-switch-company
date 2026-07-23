@@ -210,6 +210,8 @@ fn legacy_catalog_entry(
         default_model: default_model.to_string(),
         models: vec![default_model.to_string()],
         group: "default".to_string(),
+        // 旧格式响应里没有能力声明，交给客户端按既有逻辑推断。
+        model_capabilities: None,
     }
 }
 

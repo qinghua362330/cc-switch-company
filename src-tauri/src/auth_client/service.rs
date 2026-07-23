@@ -162,6 +162,8 @@ fn add_gemini_entry_from_model_catalog(catalog: &mut Vec<CatalogEntry>) {
         default_model,
         models,
         group,
+        // 这条是客户端本地补出来的，服务端没有对应的能力声明。
+        model_capabilities: None,
     });
 }
 

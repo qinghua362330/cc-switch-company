@@ -483,18 +483,26 @@ fn codex_catalog_model_entry(
     entry_obj.insert("availability_nux".to_string(), Value::Null);
     entry_obj.insert("upgrade".to_string(), Value::Null);
 
-    // company fork: 官方模型的能力跟随 OpenAI 上游，而不是继承单一模板。
+    // company fork: 模型能力按「供应商声明 > 本机上游表 > 模板」取，不再一律克隆模板。
     //
     // 模板取自 `CODEX_MODEL_CATALOG_TEMPLATE_SLUG`（gpt-5.5），它的推理档只有
     // low/medium/high/xhigh，也没有 speed/service tier。直接克隆给所有模型会把
     // gpt-5.6 系真实支持的 `max` / `ultra` 档、`fast` 速度档、priority 服务档
     // 和 272k 上下文一起抹平，导致 Codex 的模型选择器少档、且选不到 Fast。
     //
-    // `models_cache.json` 是 Codex 自己连 OpenAI 时落盘的真实能力表，逐模型准确。
-    // 这里按 slug 精确匹配后只覆盖「能力类」字段：命中即用上游值，未命中（自定义
-    // 模型 / 第三方中转别名）保持上面按 spec 推导的结果，用户仍可自行配置。
-    // 这样官方模型自动跟随上游演进，无需在代码里维护档位表。
-    if let Some(upstream) = codex_upstream_model_capabilities(&spec.model) {
+    // 两个能力来源的分工：
+    // - `spec.capabilities`：供应商（公司号池经 `/api/client/catalog`）声明的能力。
+    //   号池支持什么取决于池内账号，与使用者个人账号无关，因此优先级最高。
+    // - `models_cache.json`：Codex 连 OpenAI 后落盘的表，反映【本机登录账号】的
+    //   订阅，适合官方 OpenAI 直连；号池场景下只作兜底。
+    //
+    // 两者都没有（自定义模型 / 第三方中转别名）时保持上面按 spec 推导的结果，
+    // 用户仍可自行配置。
+    if let Some(upstream) = spec
+        .capabilities
+        .clone()
+        .or_else(|| codex_upstream_model_capabilities(&spec.model))
+    {
         for key in [
             "supported_reasoning_levels",
             "default_reasoning_level",
@@ -583,6 +591,11 @@ struct CodexCatalogModelSpec {
     /// back to the template default when absent. Only consulted for
     /// `NativeResponses`.
     base_instructions: Option<String>,
+    /// 供应商声明的模型能力（推理档 / 速度档 / 服务档 / 上下文窗口）。
+    ///
+    /// 公司号池经 `/api/client/catalog` 下发，因为号池能力取决于池内账号，
+    /// 而不是使用者个人账号；这一份优先于本机 `models_cache.json` 的推断。
+    capabilities: Option<Value>,
 }
 
 fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCatalogModelSpec> {
@@ -652,6 +665,12 @@ fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCa
             .filter(|text| !text.is_empty())
             .map(str::to_string);
 
+        let capabilities = model_config
+            .get("capabilities")
+            .or_else(|| model_config.get("modelCapabilities"))
+            .filter(|value| value.is_object())
+            .cloned();
+
         specs.push(CodexCatalogModelSpec {
             model: model.to_string(),
             display_name: display_name.to_string(),
@@ -659,6 +678,7 @@ fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCa
             supports_parallel_tool_calls,
             input_modalities,
             base_instructions,
+            capabilities,
         });
     }
 
@@ -2903,6 +2923,7 @@ base_url = "https://production.api/v1"
             supports_parallel_tool_calls: None,
             input_modalities: None,
             base_instructions: None,
+            capabilities: None,
         }];
         let catalog =
             codex_model_catalog_from_specs(&specs, &template, CodexCatalogToolProfile::ProxyChat);
@@ -3101,6 +3122,7 @@ base_url = "https://production.api/v1"
                 supports_parallel_tool_calls: None,
                 input_modalities: None,
                 base_instructions: None,
+                capabilities: None,
             },
             CodexCatalogModelSpec {
                 model: "deepseek/deepseek-v4-pro".to_string(),
@@ -3109,6 +3131,7 @@ base_url = "https://production.api/v1"
                 supports_parallel_tool_calls: None,
                 input_modalities: None,
                 base_instructions: None,
+                capabilities: None,
             },
             CodexCatalogModelSpec {
                 model: "glm-5.2v".to_string(),
@@ -3117,6 +3140,7 @@ base_url = "https://production.api/v1"
                 supports_parallel_tool_calls: None,
                 input_modalities: None,
                 base_instructions: None,
+                capabilities: None,
             },
             CodexCatalogModelSpec {
                 model: "deepseek-v4-flash".to_string(),
@@ -3125,6 +3149,7 @@ base_url = "https://production.api/v1"
                 supports_parallel_tool_calls: None,
                 input_modalities: Some(vec!["text".to_string(), "image".to_string()]),
                 base_instructions: None,
+                capabilities: None,
             },
             CodexCatalogModelSpec {
                 model: "custom-text-alias".to_string(),
@@ -3133,6 +3158,7 @@ base_url = "https://production.api/v1"
                 supports_parallel_tool_calls: None,
                 input_modalities: Some(vec!["text".to_string()]),
                 base_instructions: None,
+                capabilities: None,
             },
         ];
 
@@ -3193,6 +3219,92 @@ base_url = "https://production.api/v1"
     }
 
     #[test]
+    fn provider_declared_capabilities_replace_the_template_ladder() {
+        // 号池能力由服务端下发，必须盖掉模板克隆来的档位/服务档/上下文，
+        // 否则免费或未登录账号的机器会少列 max/ultra 与 Fast。
+        let mut template = load_codex_native_responses_template();
+        template["supported_reasoning_levels"] = json!([
+            { "effort": "low", "description": "" },
+            { "effort": "medium", "description": "" },
+        ]);
+        template["context_window"] = json!(128_000);
+
+        let specs = vec![CodexCatalogModelSpec {
+            model: "gpt-5.6-sol".to_string(),
+            display_name: "gpt-5.6-sol".to_string(),
+            context_window: 128_000,
+            supports_parallel_tool_calls: None,
+            input_modalities: None,
+            base_instructions: None,
+            capabilities: Some(json!({
+                "supported_reasoning_levels": [
+                    { "effort": "low", "description": "" },
+                    { "effort": "medium", "description": "" },
+                    { "effort": "high", "description": "" },
+                    { "effort": "xhigh", "description": "" },
+                    { "effort": "max", "description": "" },
+                    { "effort": "ultra", "description": "" },
+                ],
+                "default_reasoning_level": "medium",
+                "additional_speed_tiers": ["fast"],
+                "service_tiers": [{ "id": "priority", "name": "Fast", "description": "" }],
+                "context_window": 272_000,
+            })),
+        }];
+
+        let catalog =
+            codex_model_catalog_from_specs(&specs, &template, CodexCatalogToolProfile::ProxyChat);
+        let entry = &catalog["models"][0];
+
+        let efforts: Vec<&str> = entry["supported_reasoning_levels"]
+            .as_array()
+            .expect("levels")
+            .iter()
+            .filter_map(|level| level["effort"].as_str())
+            .collect();
+        assert_eq!(
+            efforts,
+            vec!["low", "medium", "high", "xhigh", "max", "ultra"],
+            "provider-declared ladder must win over the template"
+        );
+        assert_eq!(entry["additional_speed_tiers"], json!(["fast"]));
+        assert_eq!(entry["service_tiers"][0]["id"], json!("priority"));
+        assert_eq!(entry["context_window"], json!(272_000));
+        assert_eq!(entry["max_context_window"], json!(272_000));
+    }
+
+    #[test]
+    fn models_without_declared_capabilities_keep_spec_derived_values() {
+        // 自定义模型 / 中转别名没有服务端声明，也可能不在本机上游表里，
+        // 这时必须保持既有推导结果，用户仍可自行配置。
+        let mut template = load_codex_native_responses_template();
+        template["supported_reasoning_levels"] = json!([
+            { "effort": "low", "description": "" },
+            { "effort": "high", "description": "" },
+        ]);
+
+        let specs = vec![CodexCatalogModelSpec {
+            model: "some-relay-only-alias".to_string(),
+            display_name: "Relay Alias".to_string(),
+            context_window: 65_536,
+            supports_parallel_tool_calls: None,
+            input_modalities: None,
+            base_instructions: None,
+            capabilities: None,
+        }];
+
+        let catalog =
+            codex_model_catalog_from_specs(&specs, &template, CodexCatalogToolProfile::ProxyChat);
+        let entry = &catalog["models"][0];
+
+        assert_eq!(entry["context_window"], json!(65_536));
+        assert_eq!(
+            entry["supported_reasoning_levels"],
+            template["supported_reasoning_levels"]
+        );
+    }
+
+    #[test]
     fn proxy_chat_profile_still_keeps_apply_patch() {
         // Regression guard for Mode A: the proxy-chat profile must keep the
         // freeform apply_patch tool (the proxy rewrites custom<->function).
@@ -3204,6 +3316,7 @@ base_url = "https://production.api/v1"
             supports_parallel_tool_calls: None,
             input_modalities: None,
             base_instructions: None,
+            capabilities: None,
         }];
         // Using a gpt-5.5-shaped template under ProxyChat must NOT strip
         // apply_patch_tool_type. (The native template lacks it, so synthesize
