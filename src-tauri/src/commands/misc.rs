@@ -1328,6 +1328,7 @@ fn provider_command_for_app(app_type: &AppType, config_path: &str) -> String {
         AppType::Gemini => "gemini".to_string(),
         AppType::OpenCode => "opencode".to_string(),
         AppType::OpenClaw => "openclaw".to_string(),
+        AppType::GrokBuild => "grok".to_string(),
     }
 }
 

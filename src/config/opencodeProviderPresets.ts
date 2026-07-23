@@ -64,6 +64,13 @@ export const OPENCODE_PRESET_MODEL_VARIANTS: Record<
       modalities: { input: ["text", "image", "video"], output: ["text"] },
     },
     {
+      id: "kimi-k3",
+      name: "Kimi K3",
+      contextLimit: 1048576,
+      outputLimit: 131072,
+      modalities: { input: ["text", "image", "video"], output: ["text"] },
+    },
+    {
       id: "step-3.5-flash-2603",
       name: "Step 3.5 Flash 2603",
       contextLimit: 262144,
@@ -156,8 +163,8 @@ export const OPENCODE_PRESET_MODEL_VARIANTS: Record<
       modalities: { input: ["text", "image", "pdf"], output: ["text"] },
     },
     {
-      id: "global.anthropic.claude-sonnet-4-6",
-      name: "Claude Sonnet 4.6",
+      id: "global.anthropic.claude-sonnet-5",
+      name: "Claude Sonnet 5",
       contextLimit: 1000000,
       outputLimit: 64000,
       modalities: { input: ["text", "image", "pdf"], output: ["text"] },
@@ -279,6 +286,279 @@ export function getPresetModelDefaults(
 }
 
 export const opencodeProviderPresets: OpenCodeProviderPreset[] = [
+  // ===== 赞助商预设：文件顺序 = 应用内展示顺序，与 README 赞助商表对齐 =====
+  {
+    name: "Kimi",
+    primePartner: true,
+    websiteUrl: "https://platform.kimi.com?aff=cc-switch",
+    apiKeyUrl: "https://platform.kimi.com/console/api-keys?aff=cc-switch",
+    settingsConfig: {
+      npm: "@ai-sdk/openai-compatible",
+      name: "Kimi",
+      options: {
+        baseURL: "https://api.moonshot.cn/v1",
+        apiKey: "",
+        setCacheKey: true,
+      },
+      models: {
+        "kimi-k2.7-code": { name: "Kimi K2.7 Code" },
+        "kimi-k3": { name: "Kimi K3" },
+      },
+    },
+    category: "cn_official",
+    icon: "kimi",
+    iconColor: "#6366F1",
+    templateValues: {
+      baseURL: {
+        label: "Base URL",
+        placeholder: "https://api.moonshot.cn/v1",
+        defaultValue: "https://api.moonshot.cn/v1",
+        editorValue: "",
+      },
+      apiKey: {
+        label: "API Key",
+        placeholder: "sk-...",
+        editorValue: "",
+      },
+    },
+  },
+  {
+    name: "Kimi For Coding",
+    primePartner: true,
+    websiteUrl: "https://www.kimi.com/code/?aff=cc-switch",
+    apiKeyUrl: "https://platform.kimi.com/console/api-keys?aff=cc-switch",
+    settingsConfig: {
+      npm: "@ai-sdk/anthropic",
+      name: "Kimi For Coding",
+      options: {
+        baseURL: "https://api.kimi.com/coding/v1",
+        apiKey: "",
+        setCacheKey: true,
+      },
+      models: {
+        "kimi-for-coding": { name: "Kimi For Coding" },
+      },
+    },
+    category: "cn_official",
+    icon: "kimi",
+    iconColor: "#6366F1",
+    templateValues: {
+      baseURL: {
+        label: "Base URL",
+        placeholder: "https://api.kimi.com/coding/v1",
+        defaultValue: "https://api.kimi.com/coding/v1",
+        editorValue: "",
+      },
+      apiKey: {
+        label: "API Key",
+        placeholder: "sk-...",
+        editorValue: "",
+      },
+    },
+  },
+
+  {
+    name: "PackyCode",
+    websiteUrl: "https://www.packyapi.com",
+    apiKeyUrl: "https://www.packyapi.com/register?aff=cc-switch",
+    settingsConfig: {
+      npm: "@ai-sdk/anthropic",
+      name: "PackyCode",
+      options: {
+        baseURL: "https://www.packyapi.com/v1",
+        apiKey: "",
+        setCacheKey: true,
+      },
+      models: {
+        "claude-sonnet-5": { name: "Claude Sonnet 5" },
+        "claude-opus-4-8": { name: "Claude Opus 4.8" },
+      },
+    },
+    category: "third_party",
+    isPartner: true,
+    partnerPromotionKey: "packycode",
+    icon: "packycode",
+    templateValues: {
+      apiKey: {
+        label: "API Key",
+        placeholder: "",
+        editorValue: "",
+      },
+    },
+  },
+  {
+    name: "ZetaAPI",
+    websiteUrl: "https://zetaapi.ai",
+    apiKeyUrl: "https://zetaapi.ai/go/u117",
+    settingsConfig: {
+      npm: "@ai-sdk/openai-compatible",
+      name: "ZetaAPI",
+      options: {
+        baseURL: "https://api.zetaapi.ai/v1",
+        apiKey: "",
+        setCacheKey: true,
+      },
+      models: {
+        "gpt-5.5": { name: "GPT-5.5" },
+      },
+    },
+    category: "aggregator",
+    isPartner: true,
+    partnerPromotionKey: "zetaapi",
+    icon: "zetaapi",
+    templateValues: {
+      apiKey: {
+        label: "API Key",
+        placeholder: "",
+        editorValue: "",
+      },
+    },
+  },
+  {
+    name: "APINebula",
+    websiteUrl: "https://apinebula.com",
+    apiKeyUrl: "https://apinebula.com/VjM74M",
+    settingsConfig: {
+      npm: "@ai-sdk/openai-compatible",
+      name: "APINebula",
+      options: {
+        baseURL: "https://apinebula.com/v1",
+        apiKey: "",
+        setCacheKey: true,
+      },
+      models: {
+        "gpt-5.5": { name: "GPT-5.5" },
+      },
+    },
+    category: "third_party",
+    isPartner: true,
+    partnerPromotionKey: "apinebula",
+    icon: "apinebula",
+    templateValues: {
+      apiKey: {
+        label: "API Key",
+        placeholder: "",
+        editorValue: "",
+      },
+    },
+  },
+  {
+    name: "AICodeMirror",
+    websiteUrl: "https://www.aicodemirror.com",
+    apiKeyUrl: "https://www.aicodemirror.com/register?invitecode=9915W3",
+    settingsConfig: {
+      npm: "@ai-sdk/anthropic",
+      name: "AICodeMirror",
+      options: {
+        baseURL: "https://api.aicodemirror.com/api/claudecode",
+        apiKey: "",
+        setCacheKey: true,
+      },
+      models: {
+        "claude-sonnet-5": { name: "Claude Sonnet 5" },
+        "claude-opus-4.8": { name: "Claude Opus 4.8" },
+      },
+    },
+    category: "third_party",
+    isPartner: true,
+    partnerPromotionKey: "aicodemirror",
+    icon: "aicodemirror",
+    iconColor: "#000000",
+    templateValues: {
+      apiKey: {
+        label: "API Key",
+        placeholder: "",
+        editorValue: "",
+      },
+    },
+  },
+  {
+    name: "FennoAI",
+    websiteUrl: "https://api.fenno.ai",
+    apiKeyUrl:
+      "https://api.fenno.ai/register?redirect=/purchase?tab=subscription%26group=16&aff=P9MR3D3PLCNL",
+    settingsConfig: {
+      npm: "@ai-sdk/openai-compatible",
+      name: "FennoAI",
+      options: {
+        baseURL: "https://api.fenno.ai/v1",
+        apiKey: "",
+        setCacheKey: true,
+      },
+      models: {
+        "gpt-5.5": { name: "GPT-5.5" },
+      },
+    },
+    category: "aggregator",
+    isPartner: true,
+    partnerPromotionKey: "fenno",
+    icon: "fenno",
+    templateValues: {
+      apiKey: {
+        label: "API Key",
+        placeholder: "",
+        editorValue: "",
+      },
+    },
+  },
+  {
+    name: "RunAPI",
+    websiteUrl: "https://runapi.co",
+    apiKeyUrl: "https://runapi.co/register?aff=iOKB",
+    settingsConfig: {
+      npm: "@ai-sdk/anthropic",
+      name: "RunAPI",
+      options: {
+        baseURL: "https://runapi.co",
+        apiKey: "",
+        setCacheKey: true,
+      },
+      models: {
+        "claude-sonnet-5": { name: "Claude Sonnet 5" },
+        "claude-opus-4-8": { name: "Claude Opus 4.8" },
+        "claude-haiku-4-5": { name: "Claude Haiku 4.5" },
+      },
+    },
+    category: "aggregator",
+    isPartner: true,
+    partnerPromotionKey: "runapi",
+    icon: "runapi",
+    templateValues: {
+      apiKey: {
+        label: "API Key",
+        placeholder: "",
+        editorValue: "",
+      },
+    },
+  },
+  {
+    name: "Unity2.ai",
+    websiteUrl: "https://unity2.ai",
+    apiKeyUrl: "https://unity2.ai/register?source=ccs",
+    settingsConfig: {
+      npm: "@ai-sdk/openai-compatible",
+      name: "Unity2.ai",
+      options: {
+        baseURL: "https://api.unity2.ai/v1",
+        apiKey: "",
+        setCacheKey: true,
+      },
+      models: {
+        "gpt-5.5": { name: "GPT-5.5" },
+      },
+    },
+    category: "aggregator",
+    isPartner: true,
+    partnerPromotionKey: "unity2",
+    icon: "unity2",
+    templateValues: {
+      apiKey: {
+        label: "API Key",
+        placeholder: "",
+        editorValue: "",
+      },
+    },
+  },
   {
     name: "Shengsuanyun",
     nameKey: "providerForm.presets.shengsuanyun",
@@ -294,13 +574,188 @@ export const opencodeProviderPresets: OpenCodeProviderPreset[] = [
       },
       models: {
         "anthropic/claude-opus-4.8": { name: "Claude Opus 4.8" },
-        "anthropic/claude-sonnet-4.6": { name: "Claude Sonnet 4.6" },
+        "anthropic/claude-sonnet-5": { name: "Claude Sonnet 5" },
       },
     },
     category: "aggregator",
     isPartner: true,
     partnerPromotionKey: "shengsuanyun",
     icon: "shengsuanyun",
+    templateValues: {
+      apiKey: {
+        label: "API Key",
+        placeholder: "",
+        editorValue: "",
+      },
+    },
+  },
+  {
+    name: "AIGoCode",
+    websiteUrl: "https://aigocode.com",
+    apiKeyUrl: "https://aigocode.com/invite/CC-SWITCH",
+    settingsConfig: {
+      npm: "@ai-sdk/anthropic",
+      name: "AIGoCode",
+      options: {
+        baseURL: "https://api.aigocode.com",
+        apiKey: "",
+        setCacheKey: true,
+      },
+      models: {
+        "claude-sonnet-5": { name: "Claude Sonnet 5" },
+        "claude-opus-4-8": { name: "Claude Opus 4.8" },
+      },
+    },
+    category: "third_party",
+    isPartner: true,
+    partnerPromotionKey: "aigocode",
+    icon: "aigocode",
+    iconColor: "#5B7FFF",
+    templateValues: {
+      apiKey: {
+        label: "API Key",
+        placeholder: "",
+        editorValue: "",
+      },
+    },
+  },
+  {
+    name: "SubRouter",
+    websiteUrl: "https://subrouter.ai",
+    apiKeyUrl: "https://subrouter.ai/register?aff=l3ri",
+    settingsConfig: {
+      npm: "@ai-sdk/openai-compatible",
+      name: "SubRouter",
+      options: {
+        baseURL: "https://subrouter.ai/v1",
+        apiKey: "",
+        setCacheKey: true,
+      },
+      models: {
+        "gpt-5.5": { name: "GPT-5.5" },
+      },
+    },
+    category: "aggregator",
+    isPartner: true,
+    partnerPromotionKey: "subrouter",
+    icon: "subrouter",
+    templateValues: {
+      apiKey: {
+        label: "API Key",
+        placeholder: "",
+        editorValue: "",
+      },
+    },
+  },
+  {
+    name: "APIKEY.FUN",
+    websiteUrl: "https://apikey.fun",
+    apiKeyUrl: "https://apikey.fun/register?aff=CCSwitch",
+    settingsConfig: {
+      npm: "@ai-sdk/anthropic",
+      name: "APIKEY.FUN",
+      options: {
+        baseURL: "https://api.apikey.fun/v1",
+        apiKey: "",
+        setCacheKey: true,
+      },
+      models: {
+        "claude-opus-4-8": { name: "Claude Opus 4.8" },
+        "claude-sonnet-5": { name: "Claude Sonnet 5" },
+        "claude-haiku-4-5": { name: "Claude Haiku 4.5" },
+      },
+    },
+    category: "third_party",
+    isPartner: true,
+    partnerPromotionKey: "apikeyfun",
+    icon: "apikeyfun",
+    templateValues: {
+      apiKey: {
+        label: "API Key",
+        placeholder: "",
+        editorValue: "",
+      },
+    },
+  },
+  {
+    name: "Code0",
+    websiteUrl: "https://code0.ai",
+    apiKeyUrl: "https://code0.ai/agent/register/B2XHxGjGmRvqgznY",
+    settingsConfig: {
+      npm: "@ai-sdk/openai-compatible",
+      name: "Code0",
+      options: {
+        baseURL: "https://code0.ai/v1",
+        apiKey: "",
+        setCacheKey: true,
+      },
+      models: {
+        "gpt-5.5": { name: "GPT-5.5" },
+      },
+    },
+    category: "aggregator",
+    isPartner: true,
+    partnerPromotionKey: "code0",
+    icon: "code0",
+    templateValues: {
+      apiKey: {
+        label: "API Key",
+        placeholder: "",
+        editorValue: "",
+      },
+    },
+  },
+  {
+    name: "TeamoRouter",
+    websiteUrl: "https://teamorouter.com",
+    apiKeyUrl:
+      "https://teamorouter.com/?utm_source=cc_switch&utm_medium=referral&utm_campaign=ai_directory",
+    settingsConfig: {
+      npm: "@ai-sdk/openai-compatible",
+      name: "TeamoRouter",
+      options: {
+        baseURL: "https://api.teamorouter.com/v1",
+        apiKey: "",
+        setCacheKey: true,
+      },
+      models: {
+        "gpt-5.5": { name: "GPT-5.5" },
+      },
+    },
+    category: "aggregator",
+    isPartner: true,
+    partnerPromotionKey: "teamorouter",
+    icon: "teamorouter",
+    templateValues: {
+      apiKey: {
+        label: "API Key",
+        placeholder: "",
+        editorValue: "",
+      },
+    },
+  },
+  {
+    name: "ClaudeCN",
+    websiteUrl: "https://claudecn.top",
+    apiKeyUrl: "https://claudecn.ai/register?aff=HEL9",
+    settingsConfig: {
+      npm: "@ai-sdk/anthropic",
+      name: "ClaudeCN",
+      options: {
+        baseURL: "https://claudecn.top",
+        apiKey: "",
+        setCacheKey: true,
+      },
+      models: {
+        "claude-sonnet-5": { name: "Claude Sonnet 5" },
+        "claude-opus-4-8": { name: "Claude Opus 4.8" },
+        "claude-haiku-4-5": { name: "Claude Haiku 4.5" },
+      },
+    },
+    category: "third_party",
+    isPartner: true,
+    partnerPromotionKey: "claudecn",
+    icon: "claudecn",
     templateValues: {
       apiKey: {
         label: "API Key",
@@ -390,7 +845,7 @@ export const opencodeProviderPresets: OpenCodeProviderPreset[] = [
         setCacheKey: true,
       },
       models: {
-        "doubao-seed-2-1-pro": {
+        "doubao-seed-2-1-pro-260628": {
           name: "Doubao Seed 2.1 Pro",
         },
       },
@@ -400,6 +855,62 @@ export const opencodeProviderPresets: OpenCodeProviderPreset[] = [
     partnerPromotionKey: "doubaoseed",
     icon: "doubao",
     iconColor: "#3370FF",
+    templateValues: {
+      apiKey: {
+        label: "API Key",
+        placeholder: "",
+        editorValue: "",
+      },
+    },
+  },
+  {
+    name: "NekoCode",
+    websiteUrl: "https://nekocode.ai",
+    apiKeyUrl: "https://nekocode.ai?aff=CCSWITCH",
+    settingsConfig: {
+      npm: "@ai-sdk/openai-compatible",
+      name: "NekoCode",
+      options: {
+        baseURL: "https://nekocode.ai/v1",
+        apiKey: "",
+        setCacheKey: true,
+      },
+      models: {
+        "gpt-5.5": { name: "GPT-5.5" },
+      },
+    },
+    category: "aggregator",
+    isPartner: true,
+    partnerPromotionKey: "nekocode",
+    icon: "nekocode",
+    templateValues: {
+      apiKey: {
+        label: "API Key",
+        placeholder: "",
+        editorValue: "",
+      },
+    },
+  },
+  {
+    name: "AtlasCloud",
+    websiteUrl: "https://www.atlascloud.ai/console/coding-plan",
+    apiKeyUrl: "https://www.atlascloud.ai/console/coding-plan",
+    settingsConfig: {
+      npm: "@ai-sdk/openai-compatible",
+      name: "AtlasCloud",
+      options: {
+        baseURL: "https://api.atlascloud.ai/v1",
+        apiKey: "",
+        setCacheKey: true,
+      },
+      models: {
+        "zai-org/glm-5.1": { name: "GLM 5.1" },
+      },
+    },
+    category: "aggregator",
+    isPartner: true,
+    partnerPromotionKey: "atlascloud",
+    icon: "atlascloud",
     templateValues: {
       apiKey: {
         label: "API Key",
@@ -437,25 +948,27 @@ export const opencodeProviderPresets: OpenCodeProviderPreset[] = [
     },
   },
   {
-    name: "SubRouter",
-    websiteUrl: "https://subrouter.ai",
-    apiKeyUrl: "https://subrouter.ai/register?aff=l3ri",
+    name: "SSSAiCode",
+    websiteUrl: "https://sssaicodeapi.com",
+    apiKeyUrl: "https://sssaicodeapi.com/register?ref=DCP0SM",
     settingsConfig: {
-      npm: "@ai-sdk/openai-compatible",
-      name: "SubRouter",
+      npm: "@ai-sdk/anthropic",
+      name: "SSSAiCode",
       options: {
-        baseURL: "https://subrouter.ai/v1",
+        baseURL: "https://node-hk.sssaicodeapi.com/api/v1",
         apiKey: "",
         setCacheKey: true,
       },
       models: {
-        "gpt-5.5": { name: "GPT-5.5" },
+        "claude-sonnet-5": { name: "Claude Sonnet 5" },
+        "claude-opus-4-8": { name: "Claude Opus 4.8" },
       },
     },
-    category: "aggregator",
+    category: "third_party",
     isPartner: true,
-    partnerPromotionKey: "subrouter",
-    icon: "subrouter",
+    partnerPromotionKey: "sssaicode",
+    icon: "sssaicode",
+    iconColor: "#000000",
     templateValues: {
       apiKey: {
         label: "API Key",
@@ -465,14 +978,192 @@ export const opencodeProviderPresets: OpenCodeProviderPreset[] = [
     },
   },
   {
-    name: "Unity2.ai",
-    websiteUrl: "https://unity2.ai",
-    apiKeyUrl: "https://unity2.ai/register?source=ccs",
+    name: "Micu",
+    websiteUrl: "https://www.micuapi.ai",
+    apiKeyUrl: "https://www.micuapi.ai/register?aff=aOYQ",
+    settingsConfig: {
+      npm: "@ai-sdk/anthropic",
+      name: "Micu",
+      options: {
+        baseURL: "https://www.micuapi.ai/v1",
+        apiKey: "",
+        setCacheKey: true,
+      },
+      models: {
+        "claude-opus-4-8": { name: "Claude Opus 4.8" },
+        "claude-sonnet-5": { name: "Claude Sonnet 5" },
+      },
+    },
+    category: "third_party",
+    isPartner: true,
+    partnerPromotionKey: "micu",
+    icon: "micu",
+    iconColor: "#000000",
+    templateValues: {
+      apiKey: {
+        label: "API Key",
+        placeholder: "",
+        editorValue: "",
+      },
+    },
+  },
+  {
+    name: "RightCode",
+    websiteUrl: "https://www.right.codes",
+    apiKeyUrl: "https://www.right.codes/register?aff=CCSWITCH",
+    settingsConfig: {
+      npm: "@ai-sdk/openai",
+      name: "RightCode",
+      options: {
+        baseURL: "https://right.codes/codex/v1",
+        apiKey: "",
+        setCacheKey: true,
+      },
+      models: {
+        "gpt-5.5": { name: "GPT-5.5" },
+      },
+    },
+    category: "third_party",
+    isPartner: true,
+    partnerPromotionKey: "rightcode",
+    icon: "rc",
+    iconColor: "#E96B2C",
+    templateValues: {
+      apiKey: {
+        label: "API Key",
+        placeholder: "",
+        editorValue: "",
+      },
+    },
+  },
+  {
+    name: "ETok.ai",
+    websiteUrl: "https://etok.ai",
+    apiKeyUrl: "https://etok.ai",
+    settingsConfig: {
+      npm: "@ai-sdk/anthropic",
+      name: "ETok",
+      options: {
+        baseURL: "https://api.etok.ai/v1",
+        apiKey: "",
+        setCacheKey: true,
+      },
+      models: {
+        "claude-opus-4-8": { name: "Claude Opus 4.8" },
+        "claude-sonnet-5": { name: "Claude Sonnet 5" },
+      },
+    },
+    category: "third_party",
+    isPartner: true,
+    partnerPromotionKey: "etok",
+    icon: "etok",
+    iconColor: "#000000",
+    templateValues: {
+      apiKey: {
+        label: "API Key",
+        placeholder: "",
+        editorValue: "",
+      },
+    },
+  },
+  {
+    name: "Cubence",
+    websiteUrl: "https://cubence.com",
+    apiKeyUrl: "https://cubence.com/signup?code=CCSWITCH&source=ccs",
+    settingsConfig: {
+      npm: "@ai-sdk/anthropic",
+      name: "Cubence",
+      options: {
+        baseURL: "https://api.cubence.com/v1",
+        apiKey: "",
+        setCacheKey: true,
+      },
+      models: {
+        "claude-sonnet-5": { name: "Claude Sonnet 5" },
+        "claude-opus-4-8": { name: "Claude Opus 4.8" },
+      },
+    },
+    category: "third_party",
+    isPartner: true,
+    partnerPromotionKey: "cubence",
+    icon: "cubence",
+    iconColor: "#000000",
+    templateValues: {
+      apiKey: {
+        label: "API Key",
+        placeholder: "",
+        editorValue: "",
+      },
+    },
+  },
+  {
+    name: "CrazyRouter",
+    websiteUrl: "https://www.crazyrouter.com",
+    apiKeyUrl: "https://www.crazyrouter.com/register?aff=OZcm&ref=cc-switch",
+    settingsConfig: {
+      npm: "@ai-sdk/anthropic",
+      name: "CrazyRouter",
+      options: {
+        baseURL: "https://cn.crazyrouter.com",
+        apiKey: "",
+        setCacheKey: true,
+      },
+      models: {
+        "claude-sonnet-5": { name: "Claude Sonnet 5" },
+        "claude-opus-4-8": { name: "Claude Opus 4.8" },
+      },
+    },
+    category: "third_party",
+    isPartner: true,
+    partnerPromotionKey: "crazyrouter",
+    icon: "crazyrouter",
+    iconColor: "#000000",
+    templateValues: {
+      apiKey: {
+        label: "API Key",
+        placeholder: "",
+        editorValue: "",
+      },
+    },
+  },
+  {
+    name: "DMXAPI",
+    websiteUrl: "https://www.dmxapi.cn",
+    apiKeyUrl: "https://www.dmxapi.cn",
+    settingsConfig: {
+      npm: "@ai-sdk/anthropic",
+      name: "DMXAPI",
+      options: {
+        baseURL: "https://www.dmxapi.cn/v1",
+        apiKey: "",
+        setCacheKey: true,
+      },
+      models: {
+        "claude-sonnet-5": { name: "Claude Sonnet 5" },
+        "claude-opus-4-8": { name: "Claude Opus 4.8" },
+      },
+    },
+    category: "aggregator",
+    isPartner: true,
+    partnerPromotionKey: "dmxapi",
+    templateValues: {
+      apiKey: {
+        label: "API Key",
+        placeholder: "",
+        editorValue: "",
+      },
+    },
+  },
+  {
+    name: "Qiniu",
+    nameKey: "providerForm.presets.qiniu",
+    websiteUrl: "https://s.qiniu.com/nMvAvy",
+    apiKeyUrl: "https://s.qiniu.com/nMvAvy",
     settingsConfig: {
       npm: "@ai-sdk/openai-compatible",
-      name: "Unity2.ai",
+      name: "Qiniu",
       options: {
-        baseURL: "https://api.unity2.ai/v1",
+        baseURL: "https://api.qnaigc.com/v1",
         apiKey: "",
         setCacheKey: true,
       },
@@ -482,8 +1173,91 @@ export const opencodeProviderPresets: OpenCodeProviderPreset[] = [
     },
     category: "aggregator",
     isPartner: true,
-    partnerPromotionKey: "unity2",
-    icon: "unity2",
+    partnerPromotionKey: "qiniu",
+    icon: "qiniu",
+    templateValues: {
+      apiKey: {
+        label: "API Key",
+        placeholder: "",
+        editorValue: "",
+      },
+    },
+  },
+  {
+    name: "SudoCode.chat",
+    websiteUrl: "https://sudocode.chat",
+    apiKeyUrl:
+      "https://sudocode.chat/register?utm_source=ccswitch&utm_medium=partner",
+    settingsConfig: {
+      npm: "@ai-sdk/openai",
+      name: "SudoCode.chat",
+      options: {
+        baseURL: "https://api.sudocode.chat/v1",
+        apiKey: "",
+        setCacheKey: true,
+      },
+      models: {
+        "gpt-5.6-sol": { name: "GPT-5.6 Sol" },
+      },
+    },
+    category: "third_party",
+    isPartner: true,
+    partnerPromotionKey: "sudocode",
+    icon: "sudocode",
+    templateValues: {
+      apiKey: {
+        label: "API Key",
+        placeholder: "",
+        editorValue: "",
+      },
+    },
+  },
+  {
+    name: "SudoCode.us",
+    websiteUrl: "https://sudocode.us",
+    apiKeyUrl: "https://sudocode.us",
+    settingsConfig: {
+      npm: "@ai-sdk/openai",
+      name: "SudoCode.us",
+      options: {
+        baseURL: "https://sudocode.us/v1",
+        apiKey: "",
+        setCacheKey: true,
+      },
+      models: {
+        "gpt-5.5": { name: "GPT-5.5" },
+      },
+    },
+    category: "third_party",
+    isPartner: true,
+    icon: "sudocode-us",
+    templateValues: {
+      apiKey: {
+        label: "API Key",
+        placeholder: "",
+        editorValue: "",
+      },
+    },
+  },
+  // ===== 非赞助商预设：应用内展示按显示名排序，此处文件顺序不影响展示 =====
+  {
+    name: "Amux",
+    websiteUrl: "https://amux.ai",
+    apiKeyUrl: "https://amux.ai",
+    settingsConfig: {
+      npm: "@ai-sdk/openai-compatible",
+      name: "Amux",
+      options: {
+        baseURL: "https://api.amux.ai/v1",
+        apiKey: "",
+        setCacheKey: true,
+      },
+      models: {
+        "gpt-5.5": { name: "GPT-5.5" },
+      },
+    },
+    category: "aggregator",
+    icon: "amux",
     templateValues: {
       apiKey: {
         label: "API Key",
@@ -607,74 +1381,6 @@ export const opencodeProviderPresets: OpenCodeProviderPreset[] = [
         label: "Base URL",
         placeholder: "https://dashscope.aliyuncs.com/compatible-mode/v1",
         defaultValue: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        editorValue: "",
-      },
-      apiKey: {
-        label: "API Key",
-        placeholder: "sk-...",
-        editorValue: "",
-      },
-    },
-  },
-  {
-    name: "Kimi",
-    primePartner: true,
-    websiteUrl: "https://platform.moonshot.cn/console?aff=cc-switch",
-    apiKeyUrl: "https://platform.moonshot.cn/console/api-keys?aff=cc-switch",
-    settingsConfig: {
-      npm: "@ai-sdk/openai-compatible",
-      name: "Kimi",
-      options: {
-        baseURL: "https://api.moonshot.cn/v1",
-        apiKey: "",
-        setCacheKey: true,
-      },
-      models: {
-        "kimi-k2.7-code": { name: "Kimi K2.7 Code" },
-      },
-    },
-    category: "cn_official",
-    icon: "kimi",
-    iconColor: "#6366F1",
-    templateValues: {
-      baseURL: {
-        label: "Base URL",
-        placeholder: "https://api.moonshot.cn/v1",
-        defaultValue: "https://api.moonshot.cn/v1",
-        editorValue: "",
-      },
-      apiKey: {
-        label: "API Key",
-        placeholder: "sk-...",
-        editorValue: "",
-      },
-    },
-  },
-  {
-    name: "Kimi For Coding",
-    primePartner: true,
-    websiteUrl: "https://www.kimi.com/code/docs/?aff=cc-switch",
-    apiKeyUrl: "https://platform.moonshot.cn/console/api-keys?aff=cc-switch",
-    settingsConfig: {
-      npm: "@ai-sdk/anthropic",
-      name: "Kimi For Coding",
-      options: {
-        baseURL: "https://api.kimi.com/coding/v1",
-        apiKey: "",
-        setCacheKey: true,
-      },
-      models: {
-        "kimi-for-coding": { name: "Kimi For Coding" },
-      },
-    },
-    category: "cn_official",
-    icon: "kimi",
-    iconColor: "#6366F1",
-    templateValues: {
-      baseURL: {
-        label: "Base URL",
-        placeholder: "https://api.kimi.com/coding/v1",
-        defaultValue: "https://api.kimi.com/coding/v1",
         editorValue: "",
       },
       apiKey: {
@@ -860,12 +1566,15 @@ export const opencodeProviderPresets: OpenCodeProviderPreset[] = [
       npm: "@ai-sdk/openai-compatible",
       name: "Longcat",
       options: {
-        baseURL: "https://api.longcat.chat/v1",
+        baseURL: "https://api.longcat.chat/openai/v1",
         apiKey: "",
         setCacheKey: true,
       },
       models: {
-        "LongCat-Flash-Chat": { name: "LongCat Flash Chat" },
+        "LongCat-2.0": {
+          name: "LongCat 2.0",
+          options: { thinking: { type: "disabled" } },
+        },
       },
     },
     category: "cn_official",
@@ -874,8 +1583,8 @@ export const opencodeProviderPresets: OpenCodeProviderPreset[] = [
     templateValues: {
       baseURL: {
         label: "Base URL",
-        placeholder: "https://api.longcat.chat/v1",
-        defaultValue: "https://api.longcat.chat/v1",
+        placeholder: "https://api.longcat.chat/openai/v1",
+        defaultValue: "https://api.longcat.chat/openai/v1",
         editorValue: "",
       },
       apiKey: {
@@ -1091,7 +1800,7 @@ export const opencodeProviderPresets: OpenCodeProviderPreset[] = [
         setCacheKey: true,
       },
       models: {
-        "claude-sonnet-4-6": { name: "Claude Sonnet 4.6" },
+        "claude-sonnet-5": { name: "Claude Sonnet 5" },
         "claude-opus-4-8": { name: "Claude Opus 4.8" },
       },
     },
@@ -1119,40 +1828,12 @@ export const opencodeProviderPresets: OpenCodeProviderPreset[] = [
         setCacheKey: true,
       },
       models: {
-        "anthropic/claude-sonnet-4.6": { name: "Claude Sonnet 4.6" },
+        "anthropic/claude-sonnet-5": { name: "Claude Sonnet 5" },
         "anthropic/claude-opus-4.8": { name: "Claude Opus 4.8" },
       },
     },
     category: "aggregator",
     icon: "cherryin",
-    templateValues: {
-      apiKey: {
-        label: "API Key",
-        placeholder: "",
-        editorValue: "",
-      },
-    },
-  },
-  {
-    name: "DMXAPI",
-    websiteUrl: "https://www.dmxapi.cn",
-    apiKeyUrl: "https://www.dmxapi.cn",
-    settingsConfig: {
-      npm: "@ai-sdk/anthropic",
-      name: "DMXAPI",
-      options: {
-        baseURL: "https://www.dmxapi.cn/v1",
-        apiKey: "",
-        setCacheKey: true,
-      },
-      models: {
-        "claude-sonnet-4-6": { name: "Claude Sonnet 4.6" },
-        "claude-opus-4-8": { name: "Claude Opus 4.8" },
-      },
-    },
-    category: "aggregator",
-    isPartner: true,
-    partnerPromotionKey: "dmxapi",
     templateValues: {
       apiKey: {
         label: "API Key",
@@ -1174,7 +1855,7 @@ export const opencodeProviderPresets: OpenCodeProviderPreset[] = [
         setCacheKey: true,
       },
       models: {
-        "anthropic/claude-sonnet-4.6": { name: "Claude Sonnet 4.6" },
+        "anthropic/claude-sonnet-5": { name: "Claude Sonnet 5" },
         "anthropic/claude-opus-4.8": { name: "Claude Opus 4.8" },
       },
     },
@@ -1202,7 +1883,7 @@ export const opencodeProviderPresets: OpenCodeProviderPreset[] = [
         setCacheKey: true,
       },
       models: {
-        "anthropic/claude-sonnet-4.6": { name: "Claude Sonnet 4.6" },
+        "anthropic/claude-sonnet-5": { name: "Claude Sonnet 5" },
         "openai/gpt-5.3-codex": { name: "GPT-5.3 Codex" },
         "openai/gpt-5.2": { name: "GPT-5.2" },
         "google/gemini-3.5-flash": {
@@ -1288,7 +1969,7 @@ export const opencodeProviderPresets: OpenCodeProviderPreset[] = [
       },
       models: {
         "claude-opus-4-8": { name: "claude-opus-4-8" },
-        "claude-sonnet-4-6": { name: "claude-sonnet-4-6" },
+        "claude-sonnet-5": { name: "claude-sonnet-5" },
         "claude-haiku-4-5-20251001": { name: "claude-haiku-4-5-20251001" },
       },
     },
@@ -1298,447 +1979,6 @@ export const opencodeProviderPresets: OpenCodeProviderPreset[] = [
       apiKey: {
         label: "API Key",
         placeholder: "pipe-...",
-        editorValue: "",
-      },
-    },
-  },
-
-  {
-    name: "PackyCode",
-    websiteUrl: "https://www.packyapi.com",
-    apiKeyUrl: "https://www.packyapi.com/register?aff=cc-switch",
-    settingsConfig: {
-      npm: "@ai-sdk/anthropic",
-      name: "PackyCode",
-      options: {
-        baseURL: "https://www.packyapi.com/v1",
-        apiKey: "",
-        setCacheKey: true,
-      },
-      models: {
-        "claude-sonnet-4-6": { name: "Claude Sonnet 4.6" },
-        "claude-opus-4-8": { name: "Claude Opus 4.8" },
-      },
-    },
-    category: "third_party",
-    isPartner: true,
-    partnerPromotionKey: "packycode",
-    icon: "packycode",
-    templateValues: {
-      apiKey: {
-        label: "API Key",
-        placeholder: "",
-        editorValue: "",
-      },
-    },
-  },
-  {
-    name: "APIKEY.FUN",
-    websiteUrl: "https://apikey.fun",
-    apiKeyUrl: "https://apikey.fun/register?aff=CCSwitch",
-    settingsConfig: {
-      npm: "@ai-sdk/anthropic",
-      name: "APIKEY.FUN",
-      options: {
-        baseURL: "https://api.apikey.fun/v1",
-        apiKey: "",
-        setCacheKey: true,
-      },
-      models: {
-        "claude-opus-4-8": { name: "Claude Opus 4.8" },
-        "claude-sonnet-4-6": { name: "Claude Sonnet 4.6" },
-        "claude-haiku-4-5": { name: "Claude Haiku 4.5" },
-      },
-    },
-    category: "third_party",
-    isPartner: true,
-    partnerPromotionKey: "apikeyfun",
-    icon: "apikeyfun",
-    templateValues: {
-      apiKey: {
-        label: "API Key",
-        placeholder: "",
-        editorValue: "",
-      },
-    },
-  },
-  {
-    name: "APINebula",
-    websiteUrl: "https://apinebula.com",
-    apiKeyUrl: "https://apinebula.com/02rw5X",
-    settingsConfig: {
-      npm: "@ai-sdk/openai-compatible",
-      name: "APINebula",
-      options: {
-        baseURL: "https://apinebula.com/v1",
-        apiKey: "",
-        setCacheKey: true,
-      },
-      models: {
-        "gpt-5.5": { name: "GPT-5.5" },
-      },
-    },
-    category: "third_party",
-    isPartner: true,
-    partnerPromotionKey: "apinebula",
-    icon: "apinebula",
-    templateValues: {
-      apiKey: {
-        label: "API Key",
-        placeholder: "",
-        editorValue: "",
-      },
-    },
-  },
-  {
-    name: "AtlasCloud",
-    websiteUrl: "https://www.atlascloud.ai/console/coding-plan",
-    apiKeyUrl: "https://www.atlascloud.ai/console/coding-plan",
-    settingsConfig: {
-      npm: "@ai-sdk/openai-compatible",
-      name: "AtlasCloud",
-      options: {
-        baseURL: "https://api.atlascloud.ai/v1",
-        apiKey: "",
-        setCacheKey: true,
-      },
-      models: {
-        "zai-org/glm-5.1": { name: "GLM 5.1" },
-      },
-    },
-    category: "aggregator",
-    isPartner: true,
-    partnerPromotionKey: "atlascloud",
-    icon: "atlascloud",
-    templateValues: {
-      apiKey: {
-        label: "API Key",
-        placeholder: "",
-        editorValue: "",
-      },
-    },
-  },
-  {
-    name: "SudoCode",
-    websiteUrl: "https://sudocode.us",
-    apiKeyUrl: "https://sudocode.us",
-    settingsConfig: {
-      npm: "@ai-sdk/openai",
-      name: "SudoCode",
-      options: {
-        baseURL: "https://sudocode.us/v1",
-        apiKey: "",
-        setCacheKey: true,
-      },
-      models: {
-        "gpt-5.5": { name: "GPT-5.5" },
-      },
-    },
-    category: "third_party",
-    icon: "sudocode",
-    templateValues: {
-      apiKey: {
-        label: "API Key",
-        placeholder: "",
-        editorValue: "",
-      },
-    },
-  },
-  {
-    name: "Cubence",
-    websiteUrl: "https://cubence.com",
-    apiKeyUrl: "https://cubence.com/signup?code=CCSWITCH&source=ccs",
-    settingsConfig: {
-      npm: "@ai-sdk/anthropic",
-      name: "Cubence",
-      options: {
-        baseURL: "https://api.cubence.com/v1",
-        apiKey: "",
-        setCacheKey: true,
-      },
-      models: {
-        "claude-sonnet-4-6": { name: "Claude Sonnet 4.6" },
-        "claude-opus-4-8": { name: "Claude Opus 4.8" },
-      },
-    },
-    category: "third_party",
-    isPartner: true,
-    partnerPromotionKey: "cubence",
-    icon: "cubence",
-    iconColor: "#000000",
-    templateValues: {
-      apiKey: {
-        label: "API Key",
-        placeholder: "",
-        editorValue: "",
-      },
-    },
-  },
-  {
-    name: "AIGoCode",
-    websiteUrl: "https://aigocode.com",
-    apiKeyUrl: "https://aigocode.com/invite/CC-SWITCH",
-    settingsConfig: {
-      npm: "@ai-sdk/anthropic",
-      name: "AIGoCode",
-      options: {
-        baseURL: "https://api.aigocode.com",
-        apiKey: "",
-        setCacheKey: true,
-      },
-      models: {
-        "claude-sonnet-4-6": { name: "Claude Sonnet 4.6" },
-        "claude-opus-4-8": { name: "Claude Opus 4.8" },
-      },
-    },
-    category: "third_party",
-    isPartner: true,
-    partnerPromotionKey: "aigocode",
-    icon: "aigocode",
-    iconColor: "#5B7FFF",
-    templateValues: {
-      apiKey: {
-        label: "API Key",
-        placeholder: "",
-        editorValue: "",
-      },
-    },
-  },
-  {
-    name: "RightCode",
-    websiteUrl: "https://www.right.codes",
-    apiKeyUrl: "https://www.right.codes/register?aff=CCSWITCH",
-    settingsConfig: {
-      npm: "@ai-sdk/openai",
-      name: "RightCode",
-      options: {
-        baseURL: "https://right.codes/codex/v1",
-        apiKey: "",
-        setCacheKey: true,
-      },
-      models: {
-        "gpt-5.5": { name: "GPT-5.5" },
-      },
-    },
-    category: "third_party",
-    isPartner: true,
-    partnerPromotionKey: "rightcode",
-    icon: "rc",
-    iconColor: "#E96B2C",
-    templateValues: {
-      apiKey: {
-        label: "API Key",
-        placeholder: "",
-        editorValue: "",
-      },
-    },
-  },
-  {
-    name: "AICodeMirror",
-    websiteUrl: "https://www.aicodemirror.com",
-    apiKeyUrl: "https://www.aicodemirror.com/register?invitecode=9915W3",
-    settingsConfig: {
-      npm: "@ai-sdk/anthropic",
-      name: "AICodeMirror",
-      options: {
-        baseURL: "https://api.aicodemirror.com/api/claudecode",
-        apiKey: "",
-        setCacheKey: true,
-      },
-      models: {
-        "claude-sonnet-4.6": { name: "Claude Sonnet 4.6" },
-        "claude-opus-4.8": { name: "Claude Opus 4.8" },
-      },
-    },
-    category: "third_party",
-    isPartner: true,
-    partnerPromotionKey: "aicodemirror",
-    icon: "aicodemirror",
-    iconColor: "#000000",
-    templateValues: {
-      apiKey: {
-        label: "API Key",
-        placeholder: "",
-        editorValue: "",
-      },
-    },
-  },
-  {
-    name: "ClaudeCN",
-    websiteUrl: "https://claudecn.top",
-    apiKeyUrl: "https://claudecn.top/register?aff=ccswitch",
-    settingsConfig: {
-      npm: "@ai-sdk/anthropic",
-      name: "ClaudeCN",
-      options: {
-        baseURL: "https://claudecn.top",
-        apiKey: "",
-        setCacheKey: true,
-      },
-      models: {
-        "claude-sonnet-4-6": { name: "Claude Sonnet 4.6" },
-        "claude-opus-4-8": { name: "Claude Opus 4.8" },
-        "claude-haiku-4-5": { name: "Claude Haiku 4.5" },
-      },
-    },
-    category: "third_party",
-    isPartner: true,
-    partnerPromotionKey: "claudecn",
-    icon: "claudecn",
-    templateValues: {
-      apiKey: {
-        label: "API Key",
-        placeholder: "",
-        editorValue: "",
-      },
-    },
-  },
-  {
-    name: "RunAPI",
-    websiteUrl: "https://runapi.co",
-    apiKeyUrl: "https://runapi.co",
-    settingsConfig: {
-      npm: "@ai-sdk/anthropic",
-      name: "RunAPI",
-      options: {
-        baseURL: "https://runapi.co",
-        apiKey: "",
-        setCacheKey: true,
-      },
-      models: {
-        "claude-sonnet-4-6": { name: "Claude Sonnet 4.6" },
-        "claude-opus-4-8": { name: "Claude Opus 4.8" },
-        "claude-haiku-4-5": { name: "Claude Haiku 4.5" },
-      },
-    },
-    category: "aggregator",
-    isPartner: true,
-    partnerPromotionKey: "runapi",
-    icon: "runapi",
-    templateValues: {
-      apiKey: {
-        label: "API Key",
-        placeholder: "",
-        editorValue: "",
-      },
-    },
-  },
-  {
-    name: "CrazyRouter",
-    websiteUrl: "https://www.crazyrouter.com",
-    apiKeyUrl: "https://www.crazyrouter.com/register?aff=OZcm&ref=cc-switch",
-    settingsConfig: {
-      npm: "@ai-sdk/anthropic",
-      name: "CrazyRouter",
-      options: {
-        baseURL: "https://cn.crazyrouter.com",
-        apiKey: "",
-        setCacheKey: true,
-      },
-      models: {
-        "claude-sonnet-4-6": { name: "Claude Sonnet 4.6" },
-        "claude-opus-4-8": { name: "Claude Opus 4.8" },
-      },
-    },
-    category: "third_party",
-    isPartner: true,
-    partnerPromotionKey: "crazyrouter",
-    icon: "crazyrouter",
-    iconColor: "#000000",
-    templateValues: {
-      apiKey: {
-        label: "API Key",
-        placeholder: "",
-        editorValue: "",
-      },
-    },
-  },
-  {
-    name: "SSSAiCode",
-    websiteUrl: "https://sssaicodeapi.com",
-    apiKeyUrl: "https://sssaicodeapi.com/register?ref=DCP0SM",
-    settingsConfig: {
-      npm: "@ai-sdk/anthropic",
-      name: "SSSAiCode",
-      options: {
-        baseURL: "https://node-hk.sssaicodeapi.com/api/v1",
-        apiKey: "",
-        setCacheKey: true,
-      },
-      models: {
-        "claude-sonnet-4-6": { name: "Claude Sonnet 4.6" },
-        "claude-opus-4-8": { name: "Claude Opus 4.8" },
-      },
-    },
-    category: "third_party",
-    isPartner: true,
-    partnerPromotionKey: "sssaicode",
-    icon: "sssaicode",
-    iconColor: "#000000",
-    templateValues: {
-      apiKey: {
-        label: "API Key",
-        placeholder: "",
-        editorValue: "",
-      },
-    },
-  },
-  {
-    name: "Micu",
-    websiteUrl: "https://www.micuapi.ai",
-    apiKeyUrl: "https://www.micuapi.ai/register?aff=aOYQ",
-    settingsConfig: {
-      npm: "@ai-sdk/anthropic",
-      name: "Micu",
-      options: {
-        baseURL: "https://www.micuapi.ai/v1",
-        apiKey: "",
-        setCacheKey: true,
-      },
-      models: {
-        "claude-opus-4-8": { name: "Claude Opus 4.8" },
-        "claude-sonnet-4-6": { name: "Claude Sonnet 4.6" },
-      },
-    },
-    category: "third_party",
-    isPartner: true,
-    partnerPromotionKey: "micu",
-    icon: "micu",
-    iconColor: "#000000",
-    templateValues: {
-      apiKey: {
-        label: "API Key",
-        placeholder: "",
-        editorValue: "",
-      },
-    },
-  },
-  {
-    name: "ETok.ai",
-    websiteUrl: "https://etok.ai",
-    apiKeyUrl: "https://etok.ai",
-    settingsConfig: {
-      npm: "@ai-sdk/anthropic",
-      name: "ETok",
-      options: {
-        baseURL: "https://api.etok.ai/v1",
-        apiKey: "",
-        setCacheKey: true,
-      },
-      models: {
-        "claude-opus-4-8": { name: "Claude Opus 4.8" },
-        "claude-sonnet-4-6": { name: "Claude Sonnet 4.6" },
-      },
-    },
-    category: "third_party",
-    isPartner: true,
-    partnerPromotionKey: "etok",
-    icon: "etok",
-    iconColor: "#000000",
-    templateValues: {
-      apiKey: {
-        label: "API Key",
-        placeholder: "",
         editorValue: "",
       },
     },
@@ -1787,8 +2027,8 @@ export const opencodeProviderPresets: OpenCodeProviderPreset[] = [
       },
       models: {
         "global.anthropic.claude-opus-4-8": { name: "Claude Opus 4.8" },
-        "global.anthropic.claude-sonnet-4-6": {
-          name: "Claude Sonnet 4.6",
+        "global.anthropic.claude-sonnet-5": {
+          name: "Claude Sonnet 5",
         },
         "global.anthropic.claude-haiku-4-5-20251001-v1:0": {
           name: "Claude Haiku 4.5",
@@ -1822,36 +2062,6 @@ export const opencodeProviderPresets: OpenCodeProviderPreset[] = [
       },
     },
   },
-  {
-    name: "OpenAI Compatible",
-    websiteUrl: "",
-    settingsConfig: {
-      npm: "@ai-sdk/openai-compatible",
-      options: {
-        baseURL: "",
-        apiKey: "",
-        setCacheKey: true,
-      },
-      models: {},
-    },
-    category: "custom",
-    isCustomTemplate: true,
-    icon: "generic",
-    iconColor: "#6B7280",
-    templateValues: {
-      baseURL: {
-        label: "Base URL",
-        placeholder: "https://api.example.com/v1",
-        editorValue: "",
-      },
-      apiKey: {
-        label: "API Key",
-        placeholder: "",
-        editorValue: "",
-      },
-    },
-  },
-
   {
     name: "Oh My OpenCode",
     websiteUrl: "https://github.com/code-yeongyu/oh-my-openagent",
