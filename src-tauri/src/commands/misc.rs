@@ -3489,6 +3489,7 @@ fn build_windows_provider_command(app_type: &AppType, config_path_for_batch: &st
         }
         AppType::Codex => "codex".to_string(),
         AppType::Gemini => "gemini".to_string(),
+        AppType::GrokBuild => "grok".to_string(),
         AppType::OpenCode => "opencode".to_string(),
         AppType::OpenClaw => "openclaw".to_string(),
     }
