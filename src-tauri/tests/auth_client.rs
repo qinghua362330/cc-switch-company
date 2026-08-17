@@ -101,6 +101,7 @@ fn sample_catalog() -> Vec<CatalogEntry> {
         default_model: "gpt-5.5".to_string(),
         models: vec!["gpt-5.5".to_string(), "gpt-5.4".to_string()],
         group: "default".to_string(),
+        model_capabilities: None,
     }]
 }
 
@@ -130,6 +131,7 @@ fn sample_login_with_newapi_gemini_models() -> LoginResponse {
                 "gemini-2.5-pro".to_string(),
             ],
             group: "default".to_string(),
+            model_capabilities: None,
         }],
         ..sample_login()
     }
