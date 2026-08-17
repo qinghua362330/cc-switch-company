@@ -71,24 +71,12 @@ describe("checkForUpdate", () => {
     expect(mocks.check).not.toHaveBeenCalled();
   });
 
-  it("公司远程清单不可用时保留 Tauri updater 兜底", async () => {
+  it("公司远程清单不可用时直接暴露错误，不切换到公共更新渠道", async () => {
     mocks.invoke.mockRejectedValue(new Error("manifest unavailable"));
-    mocks.check.mockResolvedValue({
-      version: "3.16.6",
-      notes: "fallback",
-      date: "2026-06-30",
-    });
 
-    await expect(checkForUpdate({ timeout: 1234 })).resolves.toEqual({
-      status: "available",
-      info: {
-        currentVersion: "3.16.4",
-        availableVersion: "3.16.6",
-        notes: "fallback",
-        pubDate: "2026-06-30",
-        source: "tauri",
-      },
-    });
-    expect(mocks.check).toHaveBeenCalledWith({ timeout: 1234 });
+    await expect(checkForUpdate({ timeout: 1234 })).rejects.toThrow(
+      "manifest unavailable",
+    );
+    expect(mocks.check).not.toHaveBeenCalled();
   });
 });

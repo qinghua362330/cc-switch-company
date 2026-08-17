@@ -9,6 +9,7 @@ import React, {
 import type { UpdateInfo } from "../lib/updater";
 import { checkForUpdate } from "../lib/updater";
 import { settingsApi } from "@/lib/api";
+import { confirmCompanySoftwareUpdate } from "@/lib/userAttention";
 import { toast } from "sonner";
 
 interface UpdateContextValue {
@@ -74,71 +75,70 @@ export function UpdateProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const notifyUpdateAvailable = useCallback(
-    (info: UpdateInfo, dismissed: boolean) => {
+    async (info: UpdateInfo, dismissed: boolean) => {
       if (dismissed || promptedVersionRef.current === info.availableVersion) {
         return;
       }
       promptedVersionRef.current = info.availableVersion;
-      toast.info(`检测到 CC Switch 新版本 v${info.availableVersion}`, {
-        description: info.notes || "点击立即更新会打开终端执行一键安装脚本。",
-        closeButton: true,
-        duration: 12000,
-        action: {
-          label: "立即更新",
-          onClick: () => {
-            void openInstaller(info);
-          },
-        },
-      });
+      const confirmed = await confirmCompanySoftwareUpdate(
+        info.availableVersion,
+        info.notes,
+      );
+      if (confirmed) {
+        await openInstaller(info);
+      }
     },
     [openInstaller],
   );
 
-  const checkUpdate = useCallback(async (options?: { notify?: boolean }) => {
-    if (isCheckingRef.current) return false;
-    isCheckingRef.current = true;
-    setIsChecking(true);
-    setError(null);
+  const checkUpdate = useCallback(
+    async (options?: { notify?: boolean }) => {
+      if (isCheckingRef.current) return false;
+      isCheckingRef.current = true;
+      setIsChecking(true);
+      setError(null);
 
-    try {
-      const result = await checkForUpdate({ timeout: 30000 });
+      try {
+        const result = await checkForUpdate({ timeout: 30000 });
 
-      if (result.status === "available") {
-        setHasUpdate(true);
-        setUpdateInfo(result.info);
+        if (result.status === "available") {
+          setHasUpdate(true);
+          setUpdateInfo(result.info);
 
-        // 检查是否已经关闭过这个版本的提醒
-        let dismissedVersion = localStorage.getItem(DISMISSED_VERSION_KEY);
-        if (!dismissedVersion) {
-          const legacy = localStorage.getItem(LEGACY_DISMISSED_KEY);
-          if (legacy) {
-            localStorage.setItem(DISMISSED_VERSION_KEY, legacy);
-            localStorage.removeItem(LEGACY_DISMISSED_KEY);
-            dismissedVersion = legacy;
+          // 检查是否已经关闭过这个版本的提醒
+          let dismissedVersion = localStorage.getItem(DISMISSED_VERSION_KEY);
+          if (!dismissedVersion) {
+            const legacy = localStorage.getItem(LEGACY_DISMISSED_KEY);
+            if (legacy) {
+              localStorage.setItem(DISMISSED_VERSION_KEY, legacy);
+              localStorage.removeItem(LEGACY_DISMISSED_KEY);
+              dismissedVersion = legacy;
+            }
           }
+          const dismissed = dismissedVersion === result.info.availableVersion;
+          setIsDismissed(dismissed);
+          if (options?.notify !== false) {
+            await notifyUpdateAvailable(result.info, dismissed);
+          }
+          return true; // 有更新
+        } else {
+          setHasUpdate(false);
+          setUpdateInfo(null);
+          setIsDismissed(false);
+          return false; // 已是最新
         }
-        const dismissed = dismissedVersion === result.info.availableVersion;
-        setIsDismissed(dismissed);
-        if (options?.notify !== false) {
-          notifyUpdateAvailable(result.info, dismissed);
-        }
-        return true; // 有更新
-      } else {
+      } catch (err) {
+        console.error("检查更新失败:", err);
+        setError(err instanceof Error ? err.message : "检查更新失败");
         setHasUpdate(false);
-        setUpdateInfo(null);
-        setIsDismissed(false);
-        return false; // 已是最新
+        throw err; // 抛出错误让调用方处理
+      } finally {
+        setIsChecking(false);
+        isCheckingRef.current = false;
       }
-    } catch (err) {
-      console.error("检查更新失败:", err);
-      setError(err instanceof Error ? err.message : "检查更新失败");
-      setHasUpdate(false);
-      throw err; // 抛出错误让调用方处理
-    } finally {
-      setIsChecking(false);
-      isCheckingRef.current = false;
-    }
-  }, [notifyUpdateAvailable]);
+    },
+    [notifyUpdateAvailable],
+  );
 
   const dismissUpdate = useCallback(() => {
     setIsDismissed(true);

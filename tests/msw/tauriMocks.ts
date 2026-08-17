@@ -75,6 +75,7 @@ vi.mock("@tauri-apps/api/window", () => ({
   }),
   getCurrentWindow: () => ({
     isMaximized: async () => false,
+    isMinimized: async () => false,
     isFullscreen: async () => false,
     scaleFactor: async () => 1,
     innerSize: async () => ({ width: 1240, height: 620 }),
@@ -82,6 +83,9 @@ vi.mock("@tauri-apps/api/window", () => ({
     setDecorations: async () => {},
     setMinSize: async () => {},
     setSize: async () => {},
+    show: async () => {},
+    unminimize: async () => {},
+    setFocus: async () => {},
     minimize: async () => {},
     toggleMaximize: async () => {},
     close: async () => {},

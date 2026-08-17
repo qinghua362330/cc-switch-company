@@ -314,7 +314,7 @@ fn extract_codex_top_level_u64(config_text: &str, field: &str) -> Option<u64> {
 fn codex_catalog_model_entry(
     template: &Value,
     model: &str,
-    display_name: &str,
+    display_name: Option<&str>,
     context_window: u64,
     priority: usize,
 ) -> Value {
@@ -324,6 +324,7 @@ fn codex_catalog_model_entry(
     };
 
     entry_obj.insert("slug".to_string(), json!(model));
+    let display_name = display_name.unwrap_or(model);
     entry_obj.insert("display_name".to_string(), json!(display_name));
     entry_obj.insert("description".to_string(), json!(display_name));
     entry_obj.insert("context_window".to_string(), json!(context_window));
@@ -340,8 +341,8 @@ fn codex_catalog_model_entry(
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CodexCatalogModelSpec {
     model: String,
-    display_name: String,
-    context_window: u64,
+    display_name: Option<String>,
+    context_window: Option<u64>,
 }
 
 fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCatalogModelSpec> {
@@ -353,8 +354,7 @@ fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCa
         return Vec::new();
     };
 
-    let default_context_window =
-        extract_codex_top_level_u64(config_text, "model_context_window").unwrap_or(128_000);
+    let default_context_window = extract_codex_top_level_u64(config_text, "model_context_window");
     let mut seen = std::collections::HashSet::new();
     let mut specs = Vec::new();
 
@@ -378,17 +378,18 @@ fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCa
             .and_then(|value| value.as_str())
             .map(str::trim)
             .filter(|name| !name.is_empty())
-            .unwrap_or(model);
+            .filter(|name| *name != model)
+            .map(str::to_string);
         let context_window = parse_codex_positive_u64(
             model_config
                 .get("contextWindow")
                 .or_else(|| model_config.get("context_window")),
         )
-        .unwrap_or(default_context_window);
+        .or(default_context_window);
 
         specs.push(CodexCatalogModelSpec {
             model: model.to_string(),
-            display_name: display_name.to_string(),
+            display_name,
             context_window,
         });
     }
@@ -397,19 +398,22 @@ fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCa
 }
 
 fn find_codex_model_template(catalog: &Value) -> Option<Value> {
+    find_codex_model(catalog, CODEX_MODEL_CATALOG_TEMPLATE_SLUG)
+}
+
+fn find_codex_model(catalog: &Value, slug: &str) -> Option<Value> {
     catalog
         .get("models")
         .and_then(|models| models.as_array())
         .and_then(|models| {
-            models.iter().find(|model| {
-                model.get("slug").and_then(|slug| slug.as_str())
-                    == Some(CODEX_MODEL_CATALOG_TEMPLATE_SLUG)
-            })
+            models
+                .iter()
+                .find(|model| model.get("slug").and_then(|value| value.as_str()) == Some(slug))
         })
         .cloned()
 }
 
-fn load_codex_model_template_from_cache() -> Result<Option<Value>, AppError> {
+fn load_codex_model_catalog_from_cache() -> Result<Option<Value>, AppError> {
     let path = get_codex_config_dir().join("models_cache.json");
     if !path.exists() {
         return Ok(None);
@@ -417,7 +421,7 @@ fn load_codex_model_template_from_cache() -> Result<Option<Value>, AppError> {
 
     let text = fs::read_to_string(&path).map_err(|e| AppError::io(&path, e))?;
     let catalog: Value = serde_json::from_str(&text).map_err(|e| AppError::json(&path, e))?;
-    Ok(find_codex_model_template(&catalog))
+    Ok(find_codex_model_template(&catalog).map(|_| catalog))
 }
 
 /// Fixed candidates for locating the `codex` CLI when it is not on the process
@@ -580,7 +584,7 @@ fn codex_cli_candidates() -> Vec<PathBuf> {
     candidates
 }
 
-fn load_codex_model_template_from_bundled() -> Result<Option<Value>, AppError> {
+fn load_codex_model_catalog_from_bundled() -> Result<Option<Value>, AppError> {
     for candidate in codex_cli_candidates() {
         let candidate_label = candidate.to_string_lossy();
         let output = match Command::new(&candidate)
@@ -609,18 +613,18 @@ fn load_codex_model_template_from_bundled() -> Result<Option<Value>, AppError> {
                 continue;
             }
         };
-        if let Some(template) = find_codex_model_template(&catalog) {
-            return Ok(Some(template));
+        if find_codex_model_template(&catalog).is_some() {
+            return Ok(Some(catalog));
         }
     }
 
     Ok(None)
 }
 
-fn load_codex_model_template_static() -> Option<Value> {
+fn load_codex_model_catalog_static() -> Option<Value> {
     let text = include_str!("resources/gpt5_5_template.json");
-    match serde_json::from_str(text) {
-        Ok(template) => Some(template),
+    match serde_json::from_str::<Value>(text) {
+        Ok(template) => Some(json!({ "models": [template] })),
         Err(e) => {
             log::warn!("Failed to parse bundled gpt-5.5 template: {e}");
             None
@@ -628,18 +632,18 @@ fn load_codex_model_template_static() -> Option<Value> {
     }
 }
 
-fn load_codex_model_catalog_template() -> Result<Value, AppError> {
+fn load_codex_reference_catalog() -> Result<Value, AppError> {
     // ① models_cache.json (created by Codex when it connects to OpenAI)
-    if let Some(template) = load_codex_model_template_from_cache()? {
-        return Ok(template);
+    if let Some(catalog) = load_codex_model_catalog_from_cache()? {
+        return Ok(catalog);
     }
     // ② codex CLI (PATH + platform-specific common paths)
-    if let Some(template) = load_codex_model_template_from_bundled()? {
-        return Ok(template);
+    if let Some(catalog) = load_codex_model_catalog_from_bundled()? {
+        return Ok(catalog);
     }
     // ③ Static fallback bundled at compile time
-    if let Some(template) = load_codex_model_template_static() {
-        return Ok(template);
+    if let Some(catalog) = load_codex_model_catalog_static() {
+        return Ok(catalog);
     }
 
     Err(AppError::Message(format!(
@@ -647,18 +651,42 @@ fn load_codex_model_catalog_template() -> Result<Value, AppError> {
     )))
 }
 
-fn codex_model_catalog_from_specs(specs: &[CodexCatalogModelSpec], template: &Value) -> Value {
+fn codex_model_catalog_from_specs(
+    specs: &[CodexCatalogModelSpec],
+    reference_catalog: &Value,
+) -> Value {
+    let fallback_template = find_codex_model_template(reference_catalog)
+        .or_else(|| {
+            load_codex_model_catalog_static()
+                .and_then(|catalog| find_codex_model_template(&catalog))
+        })
+        .expect("static Codex model template must be valid");
+
     let entries: Vec<Value> = specs
         .iter()
         .enumerate()
         .map(|(index, spec)| {
-            codex_catalog_model_entry(
-                template,
-                &spec.model,
-                &spec.display_name,
-                spec.context_window,
-                index,
-            )
+            if let Some(mut official_entry) = find_codex_model(reference_catalog, &spec.model) {
+                if let Some(entry_obj) = official_entry.as_object_mut() {
+                    if let Some(display_name) = spec.display_name.as_deref() {
+                        entry_obj.insert("display_name".to_string(), json!(display_name));
+                    }
+                    if let Some(context_window) = spec.context_window {
+                        entry_obj.insert("context_window".to_string(), json!(context_window));
+                        entry_obj.insert("max_context_window".to_string(), json!(context_window));
+                    }
+                    entry_obj.insert("priority".to_string(), json!(1000 + index));
+                }
+                official_entry
+            } else {
+                codex_catalog_model_entry(
+                    &fallback_template,
+                    &spec.model,
+                    spec.display_name.as_deref(),
+                    spec.context_window.unwrap_or(128_000),
+                    index,
+                )
+            }
         })
         .collect();
 
@@ -674,8 +702,11 @@ fn codex_model_catalog_from_settings(
         return Ok(None);
     }
 
-    let template = load_codex_model_catalog_template()?;
-    Ok(Some(codex_model_catalog_from_specs(&specs, &template)))
+    let reference_catalog = load_codex_reference_catalog()?;
+    Ok(Some(codex_model_catalog_from_specs(
+        &specs,
+        &reference_catalog,
+    )))
 }
 
 fn set_codex_model_catalog_json_field(
@@ -2022,38 +2053,131 @@ base_url = "https://production.api/v1"
         assert_eq!(base_url, Some("https://production.api/v1"));
     }
 
-    #[test]
-    fn codex_model_catalog_uses_provider_models_and_context() {
-        let template = json!({
-            "slug": "gpt-5.5",
-            "display_name": "GPT-5.5",
-            "description": "Frontier model",
-            "base_instructions": "gpt-5.5 base instructions",
-            "model_messages": {
-                "instructions_template": "gpt-5.5 instructions template",
-                "instructions_variables": {
-                    "personality_default": "",
-                    "personality_friendly": "",
-                    "personality_pragmatic": ""
-                }
-            },
-            "additional_speed_tiers": ["fast"],
-            "service_tiers": [
+    fn test_codex_reference_catalog() -> Value {
+        json!({
+            "models": [
                 {
-                    "id": "priority",
-                    "name": "Fast",
-                    "description": "1.5x speed, increased usage"
+                    "slug": "gpt-5.5",
+                    "display_name": "GPT-5.5",
+                    "description": "Frontier model",
+                    "base_instructions": "gpt-5.5 base instructions",
+                    "model_messages": {
+                        "instructions_template": "gpt-5.5 instructions template",
+                        "instructions_variables": {
+                            "personality_default": "",
+                            "personality_friendly": "",
+                            "personality_pragmatic": ""
+                        }
+                    },
+                    "additional_speed_tiers": ["fast"],
+                    "service_tiers": [
+                        {
+                            "id": "priority",
+                            "name": "Fast",
+                            "description": "1.5x speed, increased usage"
+                        }
+                    ],
+                    "availability_nux": {
+                        "message": "GPT-5.5 is now available."
+                    },
+                    "upgrade": {
+                        "target": "gpt-5.5"
+                    },
+                    "context_window": 272000,
+                    "max_context_window": 272000
+                },
+                {
+                    "slug": "gpt-5.6-sol",
+                    "display_name": "GPT-5.6-Sol",
+                    "description": "Most capable coding model",
+                    "context_window": 272000,
+                    "max_context_window": 272000,
+                    "effective_context_window_percent": 95,
+                    "auto_compact_token_limit": null,
+                    "tool_mode": "code_mode_only",
+                    "multi_agent_version": "v2",
+                    "supported_reasoning_levels": [
+                        { "effort": "high", "description": "Greater reasoning depth" },
+                        { "effort": "max", "description": "Maximum reasoning depth" }
+                    ],
+                    "supports_parallel_tool_calls": true,
+                    "supports_image_detail_original": true,
+                    "truncation_policy": { "mode": "tokens", "limit": 10000 },
+                    "use_responses_lite": true,
+                    "web_search_tool_type": "text_and_image",
+                    "model_messages": {
+                        "instructions_template": "gpt-5.6-sol instructions template"
+                    }
                 }
-            ],
-            "availability_nux": {
-                "message": "GPT-5.5 is now available."
-            },
-            "upgrade": {
-                "target": "gpt-5.5"
-            },
-            "context_window": 272000,
-            "max_context_window": 272000
+            ]
+        })
+    }
+
+    #[test]
+    fn codex_model_catalog_preserves_exact_official_model_metadata() {
+        let reference_catalog = test_codex_reference_catalog();
+        let settings = json!({
+            "modelCatalog": {
+                "models": [
+                    {
+                        "model": "gpt-5.6-sol",
+                        "displayName": "gpt-5.6-sol"
+                    }
+                ]
+            }
         });
+        let specs = codex_catalog_model_specs(&settings, "");
+        let catalog = codex_model_catalog_from_specs(&specs, &reference_catalog);
+        let model = &catalog["models"][0];
+
+        assert_eq!(model["display_name"], json!("GPT-5.6-Sol"));
+        assert_eq!(model["context_window"], json!(272_000));
+        assert_eq!(model["max_context_window"], json!(272_000));
+        assert_eq!(model["effective_context_window_percent"], json!(95));
+        assert!(model["auto_compact_token_limit"].is_null());
+        assert_eq!(model["tool_mode"], json!("code_mode_only"));
+        assert_eq!(model["multi_agent_version"], json!("v2"));
+        assert_eq!(model["supports_parallel_tool_calls"], json!(true));
+        assert_eq!(model["supports_image_detail_original"], json!(true));
+        assert_eq!(model["use_responses_lite"], json!(true));
+        assert_eq!(model["web_search_tool_type"], json!("text_and_image"));
+        assert_eq!(
+            model["supported_reasoning_levels"],
+            reference_catalog["models"][1]["supported_reasoning_levels"]
+        );
+        assert_eq!(
+            model["model_messages"],
+            reference_catalog["models"][1]["model_messages"]
+        );
+    }
+
+    #[test]
+    fn codex_model_catalog_applies_explicit_official_model_overrides() {
+        let reference_catalog = test_codex_reference_catalog();
+        let settings = json!({
+            "modelCatalog": {
+                "models": [
+                    {
+                        "model": "gpt-5.6-sol",
+                        "displayName": "Company Sol",
+                        "contextWindow": 196000
+                    }
+                ]
+            }
+        });
+        let specs = codex_catalog_model_specs(&settings, "");
+        let catalog = codex_model_catalog_from_specs(&specs, &reference_catalog);
+        let model = &catalog["models"][0];
+
+        assert_eq!(model["display_name"], json!("Company Sol"));
+        assert_eq!(model["context_window"], json!(196_000));
+        assert_eq!(model["max_context_window"], json!(196_000));
+        assert_eq!(model["tool_mode"], json!("code_mode_only"));
+    }
+
+    #[test]
+    fn codex_model_catalog_uses_compatibility_template_for_custom_models() {
+        let reference_catalog = test_codex_reference_catalog();
         let settings = json!({
             "modelCatalog": {
                 "models": [
@@ -2069,8 +2193,8 @@ base_url = "https://production.api/v1"
                 ]
             }
         });
-        let specs = codex_catalog_model_specs(&settings, r#"model_context_window = 128000"#);
-        let catalog = codex_model_catalog_from_specs(&specs, &template);
+        let specs = codex_catalog_model_specs(&settings, "");
+        let catalog = codex_model_catalog_from_specs(&specs, &reference_catalog);
         let models = catalog
             .get("models")
             .and_then(|value| value.as_array())
@@ -2105,7 +2229,7 @@ base_url = "https://production.api/v1"
         );
         assert_eq!(
             models[0].get("model_messages"),
-            template.get("model_messages"),
+            reference_catalog["models"][0].get("model_messages"),
             "custom catalog entries should keep the gpt-5.5 agent template"
         );
         assert_eq!(
@@ -2119,6 +2243,26 @@ base_url = "https://production.api/v1"
                 .is_some_and(|value| value.is_null()),
             "generated third-party entries should not inherit GPT-5.5 launch messaging"
         );
+    }
+
+    #[test]
+    fn codex_model_catalog_applies_global_context_override() {
+        let reference_catalog = test_codex_reference_catalog();
+        let settings = json!({
+            "modelCatalog": {
+                "models": [
+                    { "model": "gpt-5.6-sol" },
+                    { "model": "custom-model" }
+                ]
+            }
+        });
+        let specs = codex_catalog_model_specs(&settings, r#"model_context_window = 180000"#);
+        let catalog = codex_model_catalog_from_specs(&specs, &reference_catalog);
+
+        assert_eq!(catalog["models"][0]["context_window"], json!(180_000));
+        assert_eq!(catalog["models"][0]["max_context_window"], json!(180_000));
+        assert_eq!(catalog["models"][1]["context_window"], json!(180_000));
+        assert_eq!(catalog["models"][1]["max_context_window"], json!(180_000));
     }
 
     #[test]
@@ -2332,8 +2476,9 @@ name = "any"
 
     #[test]
     fn static_template_is_valid_json_with_slug() {
-        let template =
-            load_codex_model_template_static().expect("static template must parse as valid JSON");
+        let catalog =
+            load_codex_model_catalog_static().expect("static catalog must parse as valid JSON");
+        let template = find_codex_model_template(&catalog).expect("gpt-5.5 template must exist");
         assert_eq!(
             template.get("slug").and_then(|v| v.as_str()),
             Some("gpt-5.5"),
@@ -2343,8 +2488,9 @@ name = "any"
 
     #[test]
     fn static_template_has_required_keys() {
-        let template =
-            load_codex_model_template_static().expect("static template must parse as valid JSON");
+        let catalog =
+            load_codex_model_catalog_static().expect("static catalog must parse as valid JSON");
+        let template = find_codex_model_template(&catalog).expect("gpt-5.5 template must exist");
         for key in &[
             "model_messages",
             "base_instructions",

@@ -1,6 +1,7 @@
 #![allow(non_snake_case)]
 
 use crate::app_config::AppType;
+use crate::commands::CompanyAuthState;
 use crate::init_status::{InitErrorPayload, SkillsMigrationPayload};
 use crate::services::ProviderService;
 use once_cell::sync::Lazy;
@@ -19,8 +20,11 @@ use std::os::windows::process::CommandExt;
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-const CC_SWITCH_UPDATE_MANIFEST_URL: &str =
-    "https://github.com/qinghua362330/cc-switch-company/releases/latest/download/latest-company.json";
+const CC_SWITCH_ENTERPRISE_UPDATE_MANIFEST_URL: &str = "https://leharrt.com/api/client/update";
+#[cfg(target_os = "windows")]
+const CC_SWITCH_INSTALLER_URL: &str =
+    "https://github.com/qinghua362330/cc-switch-company/releases/latest/download/install.ps1";
+#[cfg(not(target_os = "windows"))]
 const CC_SWITCH_INSTALLER_URL: &str =
     "https://github.com/qinghua362330/cc-switch-company/releases/latest/download/install.sh";
 
@@ -39,6 +43,8 @@ pub struct CcSwitchUpdateManifest {
         alias = "install_url"
     )]
     pub installer_url: Option<String>,
+    #[serde(default)]
+    pub installer_urls: Option<HashMap<String, String>>,
     #[serde(default, alias = "download_url", alias = "downloadUrl")]
     pub download_url: Option<String>,
     #[serde(
@@ -66,38 +72,66 @@ pub async fn open_external(app: AppHandle, url: String) -> Result<bool, String> 
     Ok(true)
 }
 
+/// Codex 桌面应用在新版被重命名为 "ChatGPT"（`/Applications/ChatGPT.app`），
+/// 旧版仍叫 "Codex"。切换后要重启的是当前这台机器上实际存在/在跑的那一个，
+/// 不能写死 "Codex"，否则新版机器上 `open -a Codex` 直接失败、切换提示退化成
+/// "请手动重启"，历史/配置也不生效。优先级：正在运行的实例 > 已安装的应用 >
+/// 新名 "ChatGPT"（新装用户的默认）。
+#[cfg(target_os = "macos")]
+const CODEX_APP_CANDIDATES: [&str; 2] = ["ChatGPT", "Codex"];
+
+#[cfg(target_os = "macos")]
+fn resolve_codex_app_name() -> &'static str {
+    for name in CODEX_APP_CANDIDATES {
+        if is_process_running_macos(name) {
+            return name;
+        }
+    }
+    for name in CODEX_APP_CANDIDATES {
+        if std::path::Path::new(&format!("/Applications/{name}.app")).exists() {
+            return name;
+        }
+    }
+    CODEX_APP_CANDIDATES[0]
+}
+
 #[tauri::command]
 pub async fn open_codex_app() -> Result<bool, String> {
     #[cfg(target_os = "macos")]
     {
-        if is_process_running_macos("Codex") {
-            let _ = Command::new("pkill").args(["-9", "-x", "Codex"]).output();
-            wait_for_process_exit_macos("Codex", 20, 100);
+        let app_name = resolve_codex_app_name();
+        if is_process_running_macos(app_name) {
+            let _ = Command::new("pkill").args(["-9", "-x", app_name]).output();
+            wait_for_process_exit_macos(app_name, 20, 100);
         }
 
         let output = Command::new("open")
-            .args(["-a", "Codex"])
+            .args(["-a", app_name])
             .output()
-            .map_err(|e| format!("重启 Codex 应用失败: {e}"))?;
+            .map_err(|e| format!("重启 {app_name} 应用失败: {e}"))?;
         if !output.status.success() {
             let stderr = decode_command_output(&output.stderr);
-            return Err(format!("重启 Codex 应用失败: {stderr}"));
+            return Err(format!("重启 {app_name} 应用失败: {stderr}"));
         }
         return Ok(true);
     }
 
     #[cfg(target_os = "windows")]
     {
-        let output = Command::new("cmd")
-            .args(["/C", "start", "", "Codex"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-            .map_err(|e| format!("启动 Codex 应用失败: {e}"))?;
-        if !output.status.success() {
-            let stderr = decode_command_output(&output.stderr);
-            return Err(format!("启动 Codex 应用失败: {stderr}"));
+        // Windows 同样先试新名 ChatGPT，失败再回退旧名 Codex。
+        let mut last_err = String::new();
+        for app_name in ["ChatGPT", "Codex"] {
+            match Command::new("cmd")
+                .args(["/C", "start", "", app_name])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output()
+            {
+                Ok(output) if output.status.success() => return Ok(true),
+                Ok(output) => last_err = decode_command_output(&output.stderr),
+                Err(e) => last_err = e.to_string(),
+            }
         }
-        return Ok(true);
+        return Err(format!("启动 Codex/ChatGPT 应用失败: {last_err}"));
     }
 
     #[cfg(target_os = "linux")]
@@ -175,38 +209,39 @@ fn ensure_http_url(url: &str) -> Result<(), String> {
 #[tauri::command]
 pub async fn check_cc_switch_update_manifest(
     manifestUrl: Option<String>,
+    state: State<'_, CompanyAuthState>,
 ) -> Result<CcSwitchUpdateManifest, String> {
     let manifest_url = manifestUrl
         .filter(|url| !url.trim().is_empty())
-        .unwrap_or_else(|| CC_SWITCH_UPDATE_MANIFEST_URL.to_string());
+        .unwrap_or_else(|| CC_SWITCH_ENTERPRISE_UPDATE_MANIFEST_URL.to_string());
     ensure_http_url(&manifest_url)?;
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| format!("初始化更新检查客户端失败: {e}"))?;
 
-    let response = client
-        .get(&manifest_url)
-        .header(reqwest::header::ACCEPT, "application/json")
-        .send()
-        .await
-        .map_err(|e| format!("获取更新清单失败: {e}"))?;
+    let session_token = if is_trusted_enterprise_update_url(&manifest_url) {
+        let login =
+            state.0.read().await.current_login().await.map_err(|err| {
+                format!("公司更新检查需要有效的飞书登录：{}", err.to_command_error())
+            })?;
+        Some(login.session_token)
+    } else {
+        None
+    };
 
-    if !response.status().is_success() {
-        return Err(format!("更新清单返回 HTTP {}", response.status()));
-    }
-
-    let mut manifest = response
-        .json::<CcSwitchUpdateManifest>()
-        .await
-        .map_err(|e| format!("解析更新清单失败: {e}"))?;
+    let mut manifest =
+        fetch_cc_switch_update_manifest(&client, &manifest_url, session_token.as_deref()).await?;
 
     if manifest.version.trim().is_empty() {
         return Err("更新清单缺少 version".to_string());
     }
 
-    if manifest
+    if let Some(platform_url) = platform_installer_url(&manifest) {
+        manifest.installer_url = Some(platform_url);
+    } else if manifest
         .installer_url
         .as_deref()
         .unwrap_or("")
@@ -229,6 +264,96 @@ pub async fn check_cc_switch_update_manifest(
     Ok(manifest)
 }
 
+fn current_installer_platform_keys() -> &'static [&'static str] {
+    #[cfg(target_os = "windows")]
+    {
+        &["windows", "windows-x86_64"]
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        &["macos", "darwin-aarch64", "darwin-universal"]
+    }
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    {
+        &["macos", "darwin-x86_64", "darwin-universal"]
+    }
+    #[cfg(all(
+        target_os = "macos",
+        not(any(target_arch = "aarch64", target_arch = "x86_64"))
+    ))]
+    {
+        &["macos", "darwin-universal"]
+    }
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    {
+        &["linux", "linux-x86_64"]
+    }
+}
+
+fn platform_installer_url(manifest: &CcSwitchUpdateManifest) -> Option<String> {
+    platform_installer_url_for_keys(manifest, current_installer_platform_keys())
+}
+
+fn platform_installer_url_for_keys(
+    manifest: &CcSwitchUpdateManifest,
+    platform_keys: &[&str],
+) -> Option<String> {
+    let urls = manifest.installer_urls.as_ref()?;
+    platform_keys
+        .iter()
+        .find_map(|key| urls.get(*key))
+        .map(|url| url.trim().to_string())
+        .filter(|url| !url.is_empty())
+}
+
+fn is_trusted_enterprise_update_url(url: &str) -> bool {
+    url == CC_SWITCH_ENTERPRISE_UPDATE_MANIFEST_URL
+}
+
+fn build_update_manifest_request(
+    client: &reqwest::Client,
+    manifest_url: &str,
+    session_token: Option<&str>,
+) -> reqwest::RequestBuilder {
+    let request = client
+        .get(manifest_url)
+        .header(reqwest::header::ACCEPT, "application/json");
+
+    if is_trusted_enterprise_update_url(manifest_url) {
+        if let Some(session_token) = session_token.filter(|token| !token.trim().is_empty()) {
+            return request.bearer_auth(session_token);
+        }
+    }
+
+    request
+}
+
+async fn fetch_cc_switch_update_manifest(
+    client: &reqwest::Client,
+    manifest_url: &str,
+    session_token: Option<&str>,
+) -> Result<CcSwitchUpdateManifest, String> {
+    let response = build_update_manifest_request(client, manifest_url, session_token)
+        .send()
+        .await
+        .map_err(|e| format!("获取更新清单失败: {e}"))?;
+
+    if response.status().is_redirection() {
+        return Err(format!(
+            "更新清单不允许重定向（HTTP {}）",
+            response.status()
+        ));
+    }
+    if !response.status().is_success() {
+        return Err(format!("更新清单返回 HTTP {}", response.status()));
+    }
+
+    response
+        .json::<CcSwitchUpdateManifest>()
+        .await
+        .map_err(|e| format!("解析更新清单失败: {e}"))
+}
+
 /// 打开终端执行 CC Switch 一键更新脚本。
 #[tauri::command]
 pub async fn launch_cc_switch_update_installer(
@@ -239,6 +364,16 @@ pub async fn launch_cc_switch_update_installer(
         .unwrap_or_else(|| CC_SWITCH_INSTALLER_URL.to_string());
     ensure_http_url(&installer_url)?;
 
+    #[cfg(target_os = "windows")]
+    let command = format!(
+        "powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand {}",
+        powershell_encoded_command(&format!(
+            "$ErrorActionPreference='Stop'; $tmp=[IO.Path]::GetTempFileName(); try {{ Invoke-WebRequest -UseBasicParsing -Uri '{}' -OutFile $tmp; & powershell -NoProfile -ExecutionPolicy Bypass -File $tmp; if ($LASTEXITCODE) {{ exit $LASTEXITCODE }} }} finally {{ Remove-Item -Force -ErrorAction SilentlyContinue $tmp }}",
+            installer_url.replace('`', "``").replace('\'', "''")
+        ))
+    );
+
+    #[cfg(not(target_os = "windows"))]
     let command = format!(
         r#"tmp=$(mktemp)
 curl -fsSL {url} -o "$tmp"
@@ -3735,7 +3870,73 @@ pub async fn set_window_theme(window: tauri::Window, theme: String) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reqwest::header::AUTHORIZATION;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn enterprise_update_request_receives_the_authenticated_session() {
+        let client = reqwest::Client::new();
+        let request = build_update_manifest_request(
+            &client,
+            CC_SWITCH_ENTERPRISE_UPDATE_MANIFEST_URL,
+            Some("session-test-token"),
+        )
+        .build()
+        .expect("request should build");
+
+        assert_eq!(
+            request
+                .headers()
+                .get(AUTHORIZATION)
+                .and_then(|v| v.to_str().ok()),
+            Some("Bearer session-test-token")
+        );
+    }
+
+    #[test]
+    fn custom_update_request_never_receives_the_authenticated_session() {
+        let client = reqwest::Client::new();
+        let request = build_update_manifest_request(
+            &client,
+            "https://updates.example.com/latest.json",
+            Some("session-test-token"),
+        )
+        .build()
+        .expect("request should build");
+
+        assert!(!request.headers().contains_key(AUTHORIZATION));
+    }
+
+    #[test]
+    fn platform_installer_prefers_generic_key_then_architecture_alias() {
+        let manifest = CcSwitchUpdateManifest {
+            version: "3.18.1".to_string(),
+            notes: None,
+            pub_date: None,
+            installer_url: None,
+            installer_urls: Some(HashMap::from([
+                (
+                    "macos".to_string(),
+                    "https://example.com/macos.sh".to_string(),
+                ),
+                (
+                    "darwin-aarch64".to_string(),
+                    "https://example.com/arm64.sh".to_string(),
+                ),
+            ])),
+            download_url: None,
+            release_notes_url: None,
+        };
+
+        assert_eq!(
+            platform_installer_url_for_keys(&manifest, &["macos", "darwin-aarch64"]).as_deref(),
+            Some("https://example.com/macos.sh")
+        );
+        assert_eq!(
+            platform_installer_url_for_keys(&manifest, &["windows", "darwin-aarch64"]).as_deref(),
+            Some("https://example.com/arm64.sh")
+        );
+    }
 
     #[cfg(unix)]
     fn set_test_executable(path: &Path, executable: bool) {

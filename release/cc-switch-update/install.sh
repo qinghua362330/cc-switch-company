@@ -30,6 +30,11 @@ fail() {
   exit 1
 }
 
+python3_usable() {
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 -c 'import sys' >/dev/null 2>&1
+}
+
 detect_arch() {
   local kernel
   kernel="$(uname -s 2>/dev/null || printf 'unknown')"
@@ -71,7 +76,7 @@ json_get() {
   local file="$1"
   local path="$2"
 
-  if command -v python3 >/dev/null 2>&1; then
+  if python3_usable; then
     python3 - "$file" "$path" <<'PY'
 import json
 import sys
@@ -116,7 +121,7 @@ json_keys() {
   local file="$1"
   local path="$2"
 
-  if command -v python3 >/dev/null 2>&1; then
+  if python3_usable; then
     python3 - "$file" "$path" <<'PY'
 import json
 import sys
@@ -175,7 +180,7 @@ try_metadata_package() {
 find_macos_asset_url() {
   local release_json="$1"
 
-  if command -v python3 >/dev/null 2>&1; then
+  if python3_usable; then
     python3 - "$release_json" <<'PY'
 import json
 import re

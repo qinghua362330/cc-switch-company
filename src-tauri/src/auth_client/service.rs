@@ -100,6 +100,11 @@ where
         }
     }
 
+    pub async fn catalog_version(&self) -> Result<String, AuthError> {
+        let secrets = self.persistence.load_secrets()?;
+        self.client.catalog_version(&secrets.session_token).await
+    }
+
     pub async fn logout(&self) -> Result<AuthState, AuthError> {
         self.persistence.clear()?;
         Ok(AuthState::unauthenticated())

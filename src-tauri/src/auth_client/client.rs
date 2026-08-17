@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use futures::future::BoxFuture;
+use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -48,6 +49,16 @@ pub trait ProvisionClient: Clone + Send + Sync + 'static {
         &'a self,
         session_token: &'a str,
     ) -> BoxFuture<'a, Result<(String, Vec<CatalogEntry>), AuthError>>;
+
+    fn catalog_version<'a>(
+        &'a self,
+        session_token: &'a str,
+    ) -> BoxFuture<'a, Result<String, AuthError>>;
+}
+
+#[derive(Debug, Deserialize)]
+struct CatalogVersionResponse {
+    version: String,
 }
 
 #[derive(Clone)]
@@ -121,6 +132,32 @@ impl ProvisionClient for ReqwestProvisionClient {
                 .map_err(|_| AuthError::malformed_response())?;
             body.validate()?;
             Ok((body.base_url, body.catalog))
+        })
+    }
+
+    fn catalog_version<'a>(
+        &'a self,
+        session_token: &'a str,
+    ) -> BoxFuture<'a, Result<String, AuthError>> {
+        Box::pin(async move {
+            let response = self
+                .client
+                .get(self.config.endpoint("/api/client/catalog/version"))
+                .bearer_auth(session_token)
+                .send()
+                .await
+                .map_err(|_| AuthError::new("network", "无法连接认证服务"))?;
+
+            let status = response.status();
+            if !status.is_success() {
+                return Err(AuthError::from_status(status.as_u16()));
+            }
+
+            let body = response
+                .json::<CatalogVersionResponse>()
+                .await
+                .map_err(|_| AuthError::malformed_response())?;
+            Ok(body.version)
         })
     }
 }
