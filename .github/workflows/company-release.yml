@@ -7,14 +7,9 @@ on:
         description: "Release tag, for example v3.16.5-company.1"
         required: true
         type: string
-      prerelease:
-        description: "Mark GitHub release as prerelease"
-        required: true
-        default: false
-        type: boolean
   push:
     tags:
-      - "v*-company*"
+      - "v*-company.*"
 
 permissions:
   contents: write
@@ -49,19 +44,31 @@ jobs:
       - name: Resolve release tag
         id: meta
         shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
-          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          TAG="$RELEASE_TAG"
           if [ -z "$TAG" ]; then
             echo "Release tag is empty" >&2
             exit 1
           fi
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          APP_VERSION="$(sed -n 's/.*"version": "\(.*\)".*/\1/p' package.json | head -1)"
+          APP_VERSION="$(node -p "require('./package.json').version")"
           if [ -z "$APP_VERSION" ]; then
             echo "Unable to resolve package.json version" >&2
             exit 1
           fi
+          EXPECTED_PREFIX="v${APP_VERSION}-company."
+          if [[ "$TAG" != "$EXPECTED_PREFIX"* ]]; then
+            echo "Release tag must match v<package-version>-company.<positive integer>; expected prefix $EXPECTED_PREFIX" >&2
+            exit 1
+          fi
+          CANDIDATE="${TAG#"$EXPECTED_PREFIX"}"
+          if [[ ! "$CANDIDATE" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Release tag must match v<package-version>-company.<positive integer>; got $TAG" >&2
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$APP_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Setup Node.js
@@ -276,15 +283,31 @@ jobs:
       - name: Resolve release tag
         id: meta
         shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
-          TAG="${{ github.event.inputs.tag || github.ref_name }}"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          APP_VERSION="$(sed -n 's/.*"version": "\(.*\)".*/\1/p' package.json | head -1)"
+          TAG="$RELEASE_TAG"
+          if [ -z "$TAG" ]; then
+            echo "Release tag is empty" >&2
+            exit 1
+          fi
+          APP_VERSION="$(node -p "require('./package.json').version")"
           if [ -z "$APP_VERSION" ]; then
             echo "Unable to resolve package.json version" >&2
             exit 1
           fi
+          EXPECTED_PREFIX="v${APP_VERSION}-company."
+          if [[ "$TAG" != "$EXPECTED_PREFIX"* ]]; then
+            echo "Release tag must match v<package-version>-company.<positive integer>; expected prefix $EXPECTED_PREFIX" >&2
+            exit 1
+          fi
+          CANDIDATE="${TAG#"$EXPECTED_PREFIX"}"
+          if [[ ! "$CANDIDATE" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Release tag must match v<package-version>-company.<positive integer>; got $TAG" >&2
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$APP_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Download artifacts
@@ -296,11 +319,43 @@ jobs:
 
       - name: Add GitHub installer scripts
         shell: bash
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
         run: |
           set -euo pipefail
           cp release/cc-switch-update/install.sh release-assets/install.sh
           cp release/cc-switch-update/install.ps1 release-assets/install.ps1
           chmod +x release-assets/install.sh
+
+          source_sh="release/cc-switch-update/install.sh"
+          pinned_sh="release-assets/install-$TAG.sh"
+          if [ "$(head -n 1 "$source_sh")" != '#!/usr/bin/env bash' ]; then
+            echo "Unexpected install.sh header" >&2
+            exit 1
+          fi
+          {
+            printf '%s\n' '#!/usr/bin/env bash'
+            printf 'export CC_SWITCH_RELEASE_TAG=%q\n' "$TAG"
+            tail -n +2 "$source_sh"
+          } > "$pinned_sh"
+          chmod +x "$pinned_sh"
+
+          source_ps1="release/cc-switch-update/install.ps1"
+          pinned_ps1="release-assets/install-$TAG.ps1"
+          awk -v tag="$TAG" '
+            replacements == 0 && /^[[:space:]]*\[string\]\$ReleaseTag = \$env:CC_SWITCH_RELEASE_TAG,$/ {
+              print "  [string]$ReleaseTag = \047" tag "\047,"
+              replacements++
+              next
+            }
+            { print }
+            END {
+              if (replacements != 1) {
+                print "Expected exactly one ReleaseTag default in install.ps1" > "/dev/stderr"
+                exit 1
+              }
+            }
+          ' "$source_ps1" > "$pinned_ps1"
 
       - name: Generate latest-company.json
         shell: bash
@@ -325,6 +380,16 @@ jobs:
             "version": "$VERSION",
             "notes": "CC Switch company release $TAG",
             "pub_date": "$pub_date",
+            "installer_url": "$base_url/install-$TAG.sh",
+            "installer_urls": {
+              "windows": "$base_url/install-$TAG.ps1",
+              "windows-x86_64": "$base_url/install-$TAG.ps1",
+              "macos": "$base_url/install-$TAG.sh",
+              "darwin-aarch64": "$base_url/install-$TAG.sh",
+              "darwin-x86_64": "$base_url/install-$TAG.sh",
+              "darwin-universal": "$base_url/install-$TAG.sh"
+            },
+            "release_notes_url": "https://github.com/$REPO/releases/tag/$TAG",
             "platforms": {
               "windows-x86_64": {
                 "signature": "$win_sig",
@@ -347,33 +412,100 @@ jobs:
               "windows-x86_64": {
                 "kind": "msi",
                 "sha256": "$win_sha",
+                "script_url": "$base_url/install-$TAG.ps1",
                 "url": "$base_url/$win_name"
               },
               "darwin-aarch64": {
                 "kind": "tar.gz",
                 "sha256": "$mac_sha",
+                "script_url": "$base_url/install-$TAG.sh",
                 "url": "$base_url/$mac_name"
               },
               "darwin-x86_64": {
                 "kind": "tar.gz",
                 "sha256": "$mac_sha",
+                "script_url": "$base_url/install-$TAG.sh",
                 "url": "$base_url/$mac_name"
               },
               "darwin-universal": {
                 "kind": "tar.gz",
                 "sha256": "$mac_sha",
+                "script_url": "$base_url/install-$TAG.sh",
                 "url": "$base_url/$mac_name"
               }
             }
           }
           EOF_JSON
 
+      - name: Validate release metadata and installers
+        shell: bash
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          pinned_sh="release-assets/install-$TAG.sh"
+          pinned_ps1="release-assets/install-$TAG.ps1"
+
+          test -s "$pinned_sh"
+          test -s "$pinned_ps1"
+          bash -n "$pinned_sh"
+          grep -F "export CC_SWITCH_RELEASE_TAG=$TAG" "$pinned_sh" >/dev/null
+          grep -F "[string]\$ReleaseTag = '$TAG'," "$pinned_ps1" >/dev/null
+
+          export PINNED_PS1="$pinned_ps1"
+          # PowerShell variables must reach pwsh unchanged.
+          # shellcheck disable=SC2016
+          pwsh -NoLogo -NoProfile -Command '
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              $env:PINNED_PS1,
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -ne 0) {
+              $errors | ForEach-Object { Write-Error $_.Message }
+              exit 1
+            }
+          '
+
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          tag = os.environ["TAG"]
+          repo = os.environ["REPO"]
+          base_url = f"https://github.com/{repo}/releases/download/{tag}"
+          metadata = json.loads(Path("release-assets/latest-company.json").read_text())
+
+          expected_scripts = {
+              "windows": f"{base_url}/install-{tag}.ps1",
+              "windows-x86_64": f"{base_url}/install-{tag}.ps1",
+              "macos": f"{base_url}/install-{tag}.sh",
+              "darwin-aarch64": f"{base_url}/install-{tag}.sh",
+              "darwin-x86_64": f"{base_url}/install-{tag}.sh",
+              "darwin-universal": f"{base_url}/install-{tag}.sh",
+          }
+          assert metadata["installer_url"] == expected_scripts["darwin-universal"]
+          assert metadata["installer_urls"] == expected_scripts
+
+          for platform, script_url in expected_scripts.items():
+              if platform in {"windows", "macos"}:
+                  continue
+              assert metadata["platforms"][platform]["url"].startswith(f"{base_url}/")
+              assert metadata["installers"][platform]["url"] == metadata["platforms"][platform]["url"]
+              assert metadata["installers"][platform]["script_url"] == script_url
+          PY
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
           name: CC Switch Company ${{ steps.meta.outputs.tag }}
-          prerelease: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease || false }}
+          prerelease: true
+          make_latest: false
           body: |
             ## CC Switch Company ${{ steps.meta.outputs.tag }}
 
@@ -382,8 +514,8 @@ jobs:
             - Windows x64: `CC-Switch-${{ steps.meta.outputs.tag }}-Windows-company-x64.msi`
             - Windows x64 Portable: `CC-Switch-${{ steps.meta.outputs.tag }}-Windows-company-x64-Portable.zip`
             - macOS Universal: `CC-Switch-${{ steps.meta.outputs.tag }}-macOS-company-universal.zip`
-            - macOS one-line installer: `install.sh`
-            - Windows one-line installer: `install.ps1`
+            - macOS pinned installer: `install-${{ steps.meta.outputs.tag }}.sh`
+            - Windows pinned installer: `install-${{ steps.meta.outputs.tag }}.ps1`
 
             `latest-company.json` 用于公司版自动更新。
           files: release-assets/*

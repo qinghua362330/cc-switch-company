@@ -121,6 +121,14 @@ export async function refreshCompanyCatalog(): Promise<CompanyCatalogRefresh> {
   }
 }
 
+export async function fetchCompanyCatalogVersion(): Promise<string> {
+  try {
+    return await invoke<string>("company_auth_catalog_version");
+  } catch (error) {
+    throw toCompanyAuthError(error);
+  }
+}
+
 export async function startCompanyFeishuLogin(): Promise<CompanyFeishuLoginStart> {
   try {
     return normalizeCompanyFeishuLoginStart(

@@ -1648,6 +1648,7 @@ pub fn run() {
             commands::company_auth_get_state,
             commands::company_auth_login_with_ticket,
             commands::company_auth_refresh_catalog,
+            commands::company_auth_catalog_version,
             commands::company_auth_sync_providers,
             commands::company_auth_logout,
             commands::company_auth_start_feishu_login,

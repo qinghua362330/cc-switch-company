@@ -9,6 +9,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { CompanyAuthGuide } from "@/components/auth/CompanyAuthGuide";
 import { CompanyAuthLogin } from "@/components/auth/CompanyAuthLogin";
 import { CompanyAuthShell } from "@/components/auth/CompanyAuthShell";
+import { useCompanyCatalogPoll } from "@/hooks/useCompanyCatalogPoll";
 import { providersApi, settingsApi } from "@/lib/api";
 import {
   getCompanyAuthState,
@@ -20,6 +21,7 @@ import {
   toCompanyAuthError,
   type CompanyAuthState,
 } from "@/lib/api/companyAuth";
+import { showCompanyCatalogUpdatedDialog } from "@/lib/userAttention";
 
 interface CompanyAuthGateProps {
   children: (props: { shell: ReactNode }) => ReactNode;
@@ -67,6 +69,33 @@ export function CompanyAuthGate({ children }: CompanyAuthGateProps) {
       console.warn("[CompanyAuth] Failed to sync company providers", syncError);
     }
   };
+
+  // 每天 10:00 拉取线上目录，仅在内容变化时重建 providers 并提示重启。
+  const refreshCompanyCatalogDaily = async () => {
+    if (!state?.authenticated) return;
+
+    const refreshed = await refreshCompanyCatalog();
+    const nextState: CompanyAuthState = {
+      authenticated: true,
+      user: state.user,
+      catalog: refreshed.catalog,
+      baseUrl: refreshed.baseUrl ?? state.baseUrl,
+    };
+    const hasChanged =
+      nextState.baseUrl !== state.baseUrl ||
+      JSON.stringify(nextState.catalog) !== JSON.stringify(state.catalog);
+
+    if (!hasChanged) return;
+
+    setState(nextState);
+    await syncCompanyProviderCards(nextState);
+    await showCompanyCatalogUpdatedDialog();
+  };
+
+  useCompanyCatalogPoll({
+    enabled: state?.authenticated === true,
+    onDailyRefresh: refreshCompanyCatalogDaily,
+  });
 
   useEffect(() => {
     let active = true;

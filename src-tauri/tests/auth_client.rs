@@ -12,6 +12,7 @@ use futures::future::BoxFuture;
 struct MockProvisionClient {
     login_result: Arc<Mutex<Option<Result<LoginResponse, AuthError>>>>,
     catalog_result: Arc<Mutex<Option<Result<(String, Vec<CatalogEntry>), AuthError>>>>,
+    catalog_version_result: Arc<Mutex<Option<Result<String, AuthError>>>>,
     seen_authorization: Arc<Mutex<Option<String>>>,
 }
 
@@ -74,6 +75,20 @@ impl ProvisionClient for MockProvisionClient {
                 .unwrap()
                 .take()
                 .expect("catalog result")
+        })
+    }
+
+    fn catalog_version<'a>(
+        &'a self,
+        session_token: &'a str,
+    ) -> BoxFuture<'a, Result<String, AuthError>> {
+        Box::pin(async move {
+            *self.seen_authorization.lock().unwrap() = Some(format!("Bearer {session_token}"));
+            self.catalog_version_result
+                .lock()
+                .unwrap()
+                .take()
+                .expect("catalog version result")
         })
     }
 }

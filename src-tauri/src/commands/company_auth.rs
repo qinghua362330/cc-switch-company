@@ -64,6 +64,19 @@ pub async fn company_auth_refresh_catalog(
 }
 
 #[tauri::command]
+pub async fn company_auth_catalog_version(
+    state: State<'_, CompanyAuthState>,
+) -> Result<String, String> {
+    state
+        .0
+        .read()
+        .await
+        .catalog_version()
+        .await
+        .map_err(|err| err.to_command_error())
+}
+
+#[tauri::command]
 pub async fn company_auth_sync_providers(
     auth_state: State<'_, CompanyAuthState>,
     app_state: State<'_, AppState>,
