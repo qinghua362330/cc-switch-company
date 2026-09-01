@@ -1,14 +1,14 @@
 use std::sync::Arc;
 
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tauri::State;
 use tokio::sync::RwLock;
 
 use crate::app_config::AppType;
 use crate::auth_client::{
-    feishu_login_start, AuthState, CatalogEntry, FeishuLoginStart, LoginResponse,
-    ProductionAuthService,
+    AuthState, CatalogEntry, FeishuLoginStart, LoginResponse, ProductionAuthService,
+    feishu_login_start,
 };
 use crate::provider::{Provider, ProviderMeta};
 use crate::services::ProviderService;
@@ -245,13 +245,14 @@ fn company_codex_settings(entry: &CatalogEntry, login: &LoginResponse) -> Value 
         "model_provider = \"custom\"\n\
          model = {}\n\
          model_reasoning_effort = \"high\"\n\
-         disable_response_storage = true\n\
+         disable_response_storage = false\n\
          \n\
          [model_providers.custom]\n\
          name = {}\n\
          base_url = {}\n\
          wire_api = \"responses\"\n\
-         requires_openai_auth = true\n",
+         requires_openai_auth = true\n\
+         supports_websockets = true\n",
         toml_string(&entry.default_model),
         toml_string(&entry.label),
         toml_string(&base_url)
@@ -349,13 +350,27 @@ pub fn normalize_company_codex_providers(
 
 fn normalize_company_codex_config_text(config_text: &str) -> String {
     let Ok(mut doc) = config_text.parse::<DocumentMut>() else {
-        return config_text
+        let mut fallback = config_text
             .replace(r#"wire_api = "chat""#, r#"wire_api = "responses""#)
             .replace(
                 r#"requires_openai_auth = false"#,
                 r#"requires_openai_auth = true"#,
             );
+        if !fallback.contains("disable_response_storage") {
+            fallback.push_str("\ndisable_response_storage = false\n");
+        } else {
+            fallback = fallback.replace(
+                "disable_response_storage = true",
+                "disable_response_storage = false",
+            );
+        }
+        if !fallback.contains("supports_websockets") {
+            fallback.push_str("supports_websockets = true\n");
+        }
+        return fallback;
     };
+
+    doc["disable_response_storage"] = toml_edit::value(false);
 
     let provider_name = doc
         .get("model_provider")
@@ -371,12 +386,14 @@ fn normalize_company_codex_config_text(config_text: &str) -> String {
     {
         table["wire_api"] = toml_edit::value("responses");
         table["requires_openai_auth"] = toml_edit::value(true);
+        table["supports_websockets"] = toml_edit::value(true);
         if let Some(base_url) = table.get("base_url").and_then(|item| item.as_str()) {
             table["base_url"] = toml_edit::value(codex_responses_base_url(base_url));
         }
     } else {
         doc["wire_api"] = toml_edit::value("responses");
         doc["requires_openai_auth"] = toml_edit::value(true);
+        doc["supports_websockets"] = toml_edit::value(true);
         if let Some(base_url) = doc.get("base_url").and_then(|item| item.as_str()) {
             doc["base_url"] = toml_edit::value(codex_responses_base_url(base_url));
         }
@@ -433,5 +450,94 @@ fn current_timestamp_millis() -> i64 {
     match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
         Ok(duration) => duration.as_millis().min(i64::MAX as u128) as i64,
         Err(_) => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_entry() -> CatalogEntry {
+        CatalogEntry {
+            tool: "codex".to_string(),
+            label: "Company Codex".to_string(),
+            protocol: "openai-responses".to_string(),
+            default_model: "gpt-5.5".to_string(),
+            models: vec!["gpt-5.5".to_string()],
+            group: "default".to_string(),
+            model_capabilities: None,
+        }
+    }
+
+    fn sample_login() -> LoginResponse {
+        LoginResponse {
+            session_token: "session".to_string(),
+            api_key: "api-key".to_string(),
+            base_url: "https://leharrt.com".to_string(),
+            user: crate::auth_client::UserIdentity {
+                display_name: "Test User".to_string(),
+                email: "test@example.com".to_string(),
+            },
+            catalog: vec![sample_entry()],
+        }
+    }
+
+    #[test]
+    fn generated_company_codex_config_enables_websocket_and_response_storage() {
+        let value = company_codex_settings(&sample_entry(), &sample_login());
+        let config = value
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("company Codex config");
+        let document = config
+            .parse::<DocumentMut>()
+            .expect("generated config must be valid TOML");
+
+        assert_eq!(
+            document
+                .get("disable_response_storage")
+                .and_then(|item| item.as_bool()),
+            Some(false)
+        );
+        assert_eq!(
+            document["model_providers"]["custom"]["supports_websockets"].as_bool(),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn normalizing_existing_company_codex_config_enables_websocket_and_response_storage() {
+        let input = r#"model_provider = "custom"
+disable_response_storage = true
+
+[model_providers.custom]
+wire_api = "chat"
+requires_openai_auth = false
+base_url = "https://leharrt.com"
+"#;
+
+        let normalized = normalize_company_codex_config_text(input);
+        let document = normalized
+            .parse::<DocumentMut>()
+            .expect("normalized config must be valid TOML");
+
+        assert_eq!(
+            document
+                .get("disable_response_storage")
+                .and_then(|item| item.as_bool()),
+            Some(false)
+        );
+        assert_eq!(
+            document["model_providers"]["custom"]["wire_api"].as_str(),
+            Some("responses")
+        );
+        assert_eq!(
+            document["model_providers"]["custom"]["requires_openai_auth"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            document["model_providers"]["custom"]["supports_websockets"].as_bool(),
+            Some(true)
+        );
     }
 }
