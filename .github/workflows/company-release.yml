@@ -504,8 +504,8 @@ jobs:
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
           name: CC Switch Company ${{ steps.meta.outputs.tag }}
-          prerelease: true
-          make_latest: false
+          prerelease: false
+          make_latest: true
           body: |
             ## CC Switch Company ${{ steps.meta.outputs.tag }}
 
