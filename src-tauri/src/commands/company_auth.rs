@@ -1,14 +1,14 @@
 use std::sync::Arc;
 
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tauri::State;
 use tokio::sync::RwLock;
 
 use crate::app_config::AppType;
 use crate::auth_client::{
-    AuthState, CatalogEntry, FeishuLoginStart, LoginResponse, ProductionAuthService,
-    feishu_login_start,
+    feishu_login_start, AuthState, CatalogEntry, FeishuLoginStart, LoginResponse,
+    ProductionAuthService,
 };
 use crate::provider::{Provider, ProviderMeta};
 use crate::services::ProviderService;
@@ -246,6 +246,8 @@ fn company_codex_settings(entry: &CatalogEntry, login: &LoginResponse) -> Value 
          model = {}\n\
          model_reasoning_effort = \"high\"\n\
          disable_response_storage = false\n\
+         experimental_realtime_webrtc_call_base_url = {}\n\
+         experimental_realtime_ws_base_url = {}\n\
          \n\
          [model_providers.custom]\n\
          name = {}\n\
@@ -254,6 +256,8 @@ fn company_codex_settings(entry: &CatalogEntry, login: &LoginResponse) -> Value 
          requires_openai_auth = true\n\
          supports_websockets = true\n",
         toml_string(&entry.default_model),
+        toml_string(&base_url),
+        toml_string(&base_url),
         toml_string(&entry.label),
         toml_string(&base_url)
     );
@@ -356,27 +360,57 @@ fn normalize_company_codex_config_text(config_text: &str) -> String {
                 r#"requires_openai_auth = false"#,
                 r#"requires_openai_auth = true"#,
             );
+        let mut additions = String::new();
         if !fallback.contains("disable_response_storage") {
-            fallback.push_str("\ndisable_response_storage = false\n");
+            additions.push_str("disable_response_storage = false\n");
         } else {
             fallback = fallback.replace(
                 "disable_response_storage = true",
                 "disable_response_storage = false",
             );
         }
-        if !fallback.contains("supports_websockets") {
-            fallback.push_str("supports_websockets = true\n");
+        if let Some(base_url) = extract_codex_base_url_from_text(&fallback) {
+            if !fallback.contains("experimental_realtime_webrtc_call_base_url") {
+                additions.push_str(&format!(
+                    "experimental_realtime_webrtc_call_base_url = {}\n",
+                    toml_string(&base_url)
+                ));
+            }
+            if !fallback.contains("experimental_realtime_ws_base_url") {
+                additions.push_str(&format!(
+                    "experimental_realtime_ws_base_url = {}\n",
+                    toml_string(&base_url)
+                ));
+            }
         }
+        if !fallback.contains("supports_websockets") {
+            additions.push_str("supports_websockets = true\n");
+        }
+        fallback = insert_top_level_config_lines(&fallback, &additions);
         return fallback;
     };
-
-    doc["disable_response_storage"] = toml_edit::value(false);
 
     let provider_name = doc
         .get("model_provider")
         .and_then(|value| value.as_str())
         .unwrap_or("custom")
         .to_string();
+
+    let realtime_base_url = doc
+        .get("model_providers")
+        .and_then(|item| item.as_table())
+        .and_then(|table| table.get(&provider_name))
+        .and_then(|item| item.as_table())
+        .and_then(|table| table.get("base_url"))
+        .and_then(|item| item.as_str())
+        .or_else(|| doc.get("base_url").and_then(|item| item.as_str()))
+        .map(codex_responses_base_url);
+
+    doc["disable_response_storage"] = toml_edit::value(false);
+    if let Some(base_url) = realtime_base_url {
+        doc["experimental_realtime_webrtc_call_base_url"] = toml_edit::value(base_url.clone());
+        doc["experimental_realtime_ws_base_url"] = toml_edit::value(base_url);
+    }
 
     if let Some(table) = doc
         .get_mut("model_providers")
@@ -409,6 +443,98 @@ fn codex_responses_base_url(base_url: &str) -> String {
     } else {
         format!("{trimmed}/v1")
     }
+}
+
+fn extract_codex_base_url_from_text(config_text: &str) -> Option<String> {
+    let mut provider_name = "custom".to_string();
+    let mut section = None;
+
+    for line in config_text.lines() {
+        let trimmed = line.trim();
+        if let Some(header) = trimmed
+            .strip_prefix('[')
+            .and_then(|line| line.strip_suffix(']'))
+        {
+            section = Some(header.trim().to_string());
+            continue;
+        }
+        if section.is_some() {
+            continue;
+        }
+        let Some((key, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        if key.trim() != "model_provider" {
+            continue;
+        }
+        if let Some(value) = parse_toml_string_value(value.trim()) {
+            provider_name = value;
+            break;
+        }
+    }
+
+    let active_provider_section = format!("model_providers.{provider_name}");
+    let mut top_level_base_url = None;
+    section = None;
+
+    for line in config_text.lines() {
+        let trimmed = line.trim();
+        if let Some(header) = trimmed
+            .strip_prefix('[')
+            .and_then(|line| line.strip_suffix(']'))
+        {
+            section = Some(header.trim().to_string());
+            continue;
+        }
+        let Some((key, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        if key.trim() != "base_url" {
+            continue;
+        }
+        let Some(base_url) = parse_toml_string_value(value.trim()) else {
+            continue;
+        };
+        if section.as_deref() == Some(active_provider_section.as_str()) {
+            return Some(codex_responses_base_url(&base_url));
+        }
+        if section.is_none() {
+            top_level_base_url = Some(base_url);
+        }
+    }
+
+    top_level_base_url.map(|base_url| codex_responses_base_url(&base_url))
+}
+
+fn parse_toml_string_value(value: &str) -> Option<String> {
+    let document = format!("value = {value}\n").parse::<DocumentMut>().ok()?;
+    document
+        .get("value")
+        .and_then(|item| item.as_str())
+        .map(str::to_string)
+}
+
+fn insert_top_level_config_lines(config_text: &str, additions: &str) -> String {
+    if additions.is_empty() {
+        return config_text.to_string();
+    }
+
+    let insertion = if config_text.starts_with('[') {
+        0
+    } else {
+        config_text
+            .find("\n[")
+            .map(|index| index + 1)
+            .unwrap_or(config_text.len())
+    };
+    let mut normalized = String::with_capacity(config_text.len() + additions.len() + 1);
+    normalized.push_str(&config_text[..insertion]);
+    if insertion > 0 && !normalized.ends_with('\n') {
+        normalized.push('\n');
+    }
+    normalized.push_str(additions);
+    normalized.push_str(&config_text[insertion..]);
+    normalized
 }
 
 fn slugify_provider_id(label: &str) -> String {
@@ -500,6 +626,22 @@ mod tests {
             Some(false)
         );
         assert_eq!(
+            document
+                .get("experimental_realtime_webrtc_call_base_url")
+                .and_then(|item| item.as_str()),
+            Some("https://leharrt.com/v1")
+        );
+        assert_eq!(
+            document
+                .get("experimental_realtime_ws_base_url")
+                .and_then(|item| item.as_str()),
+            Some("https://leharrt.com/v1")
+        );
+        assert_eq!(
+            document["model_providers"]["custom"]["name"].as_str(),
+            Some("Company Codex")
+        );
+        assert_eq!(
             document["model_providers"]["custom"]["supports_websockets"].as_bool(),
             Some(true)
         );
@@ -528,6 +670,18 @@ base_url = "https://leharrt.com"
             Some(false)
         );
         assert_eq!(
+            document
+                .get("experimental_realtime_webrtc_call_base_url")
+                .and_then(|item| item.as_str()),
+            Some("https://leharrt.com/v1")
+        );
+        assert_eq!(
+            document
+                .get("experimental_realtime_ws_base_url")
+                .and_then(|item| item.as_str()),
+            Some("https://leharrt.com/v1")
+        );
+        assert_eq!(
             document["model_providers"]["custom"]["wire_api"].as_str(),
             Some("responses")
         );
@@ -539,5 +693,30 @@ base_url = "https://leharrt.com"
             document["model_providers"]["custom"]["supports_websockets"].as_bool(),
             Some(true)
         );
+    }
+
+    #[test]
+    fn malformed_config_uses_active_provider_base_url_for_realtime_settings() {
+        let input = r#"model_provider = "custom"
+
+[mcp_servers.example]
+base_url = "https://mcp.example"
+
+[model_providers.custom]
+base_url = "https://leharrt.com"
+
+this is not valid toml
+"#;
+
+        let normalized = normalize_company_codex_config_text(input);
+        let first_table = normalized.find('[').expect("table header");
+        let top_level = &normalized[..first_table];
+
+        assert!(top_level
+            .contains("experimental_realtime_webrtc_call_base_url = \"https://leharrt.com/v1\""));
+        assert!(
+            top_level.contains("experimental_realtime_ws_base_url = \"https://leharrt.com/v1\"")
+        );
+        assert!(!top_level.contains("https://mcp.example"));
     }
 }
