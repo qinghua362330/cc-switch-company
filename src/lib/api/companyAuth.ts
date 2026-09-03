@@ -55,7 +55,8 @@ export function toCompanyAuthError(error: unknown): CompanyAuthError {
     );
   }
   if (
-    lower.includes("failed to fetch") ||
+    error instanceof TypeError ||
+    lower.includes("fetch") ||
     lower.includes("network") ||
     lower.includes("offline")
   ) {

@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { http } from "msw";
+import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppId } from "@/lib/api/types";
 import type { Provider } from "@/types";
@@ -12,6 +12,7 @@ import {
   getProviders,
   resetProviderState,
   setCompanyAuthState,
+  setSettings,
 } from "../msw/state";
 
 const TAURI_ENDPOINT = "http://tauri.local";
@@ -120,6 +121,7 @@ describe("company auth preservation and redaction", () => {
   beforeEach(() => {
     cleanup();
     resetProviderState();
+    setSettings({ firstRunNoticeConfirmed: true });
     window.localStorage.setItem(GUIDE_ACK_STORAGE_KEY, "1");
   });
 
@@ -170,7 +172,7 @@ describe("company auth preservation and redaction", () => {
     });
     server.use(
       http.post(`${TAURI_ENDPOINT}/company_auth_refresh_catalog`, () =>
-        Response.json({
+        HttpResponse.json({
           base_url: "https://leharrt.com",
           catalog: [
             {
@@ -215,7 +217,7 @@ describe("company auth preservation and redaction", () => {
     });
     server.use(
       http.post(`${TAURI_ENDPOINT}/company_auth_refresh_catalog`, () =>
-        Response.json({
+        HttpResponse.json({
           base_url: "https://leharrt.com",
           catalog: [
             {

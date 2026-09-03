@@ -1,5 +1,6 @@
 import { http, HttpResponse } from "msw";
 import type { AppId } from "@/lib/api/types";
+import { MODELS_DEV_API_URL } from "@/lib/modelsDevPricing";
 import type { McpServer, Provider, Settings } from "@/types";
 import { companyAuthHandlers } from "./companyAuthHandlers";
 import {
@@ -61,6 +62,7 @@ const isAppId = (value: unknown): value is AppId =>
     "opencode",
     "openclaw",
     "hermes",
+    "pi",
   ].some((appId) => appId === value);
 
 const isProviderInput = (value: unknown): value is ProviderInput =>
@@ -99,11 +101,13 @@ const success = (payload: unknown): Response =>
   });
 
 export const handlers = [
+  http.get(MODELS_DEV_API_URL, () => success({})),
   http.post(`${TAURI_ENDPOINT}/get_migration_result`, () => success(false)),
   http.post(`${TAURI_ENDPOINT}/get_skills_migration_result`, () =>
     success(null),
   ),
   ...companyAuthHandlers,
+  http.post(`${TAURI_ENDPOINT}/list_profiles`, () => success([])),
   http.post(`${TAURI_ENDPOINT}/get_providers`, async ({ request }) => {
     const { app } = await withJson(request);
     if (!isAppId(app)) return success({});
@@ -186,6 +190,10 @@ export const handlers = [
     deleteProvider(app, id);
     return success(true);
   }),
+
+  http.post(`${TAURI_ENDPOINT}/remove_provider_from_live_config`, () =>
+    success(true),
+  ),
 
   http.post(`${TAURI_ENDPOINT}/import_default_config`, async () => {
     resetProviderState();
@@ -395,6 +403,13 @@ export const handlers = [
     success({ success: true }),
   ),
 
+  http.post(`${TAURI_ENDPOINT}/get_pi_current_state`, () =>
+    success({
+      enabledProviderIds: [],
+      defaultProviderId: null,
+    }),
+  ),
+
   // Proxy status (for SettingsPage / ProxyPanel hooks)
   http.post(`${TAURI_ENDPOINT}/get_proxy_status`, () =>
     success({
@@ -428,6 +443,9 @@ export const handlers = [
   http.post(`${TAURI_ENDPOINT}/is_live_takeover_active`, () => success(false)),
 
   // Failover / circuit breaker defaults
+  http.post(`${TAURI_ENDPOINT}/get_auto_failover_enabled`, () =>
+    success(false),
+  ),
   http.post(`${TAURI_ENDPOINT}/get_failover_queue`, () => success([])),
   http.post(`${TAURI_ENDPOINT}/get_available_providers_for_failover`, () =>
     success([]),

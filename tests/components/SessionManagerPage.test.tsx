@@ -9,6 +9,7 @@ import {
 } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionManagerPage } from "@/components/sessions/SessionManagerPage";
+import { piApi } from "@/lib/api/pi";
 import { sessionsApi } from "@/lib/api/sessions";
 import type { SessionMessage, SessionMeta } from "@/types";
 import { setSessionFixtures } from "../msw/state";
@@ -56,7 +57,7 @@ vi.mock("@/components/ConfirmDialog", () => ({
     ) : null,
 }));
 
-const renderPage = () => {
+const renderPage = (appId = "codex") => {
   const client = new QueryClient({
     defaultOptions: {
       queries: { retry: false },
@@ -68,7 +69,7 @@ const renderPage = () => {
     client,
     ...render(
       <QueryClientProvider client={client}>
-        <SessionManagerPage appId="codex" />
+        <SessionManagerPage appId={appId} />
       </QueryClientProvider>,
     ),
   };
@@ -138,6 +139,20 @@ describe("SessionManagerPage", () => {
     };
 
     setSessionFixtures(sessions, messages);
+  });
+
+  it("surfaces a relative Pi sessionDir instead of presenting an empty scan as authoritative", async () => {
+    const discovery = vi.spyOn(piApi, "getSessionDiscovery").mockResolvedValue({
+      status: "requires_project_context",
+      configuredPath: ".pi/sessions",
+    });
+
+    renderPage("pi");
+
+    const notice = await screen.findByRole("status");
+    expect(notice).toHaveTextContent(".pi/sessions");
+    expect(discovery).toHaveBeenCalledTimes(1);
+    discovery.mockRestore();
   });
 
   it("deletes the selected session and selects the next visible session", async () => {
