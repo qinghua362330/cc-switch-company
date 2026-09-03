@@ -784,6 +784,8 @@ const HERMES_UPDATE_UNIX: &str =
 #[cfg(target_os = "windows")]
 const HERMES_INSTALL_WINDOWS_SCRIPT: &str =
     "irm https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1 | iex";
+#[cfg(target_os = "windows")]
+const GROK_INSTALL_WINDOWS_SCRIPT: &str = "irm https://x.ai/cli/install.ps1 | iex";
 
 #[cfg(target_os = "windows")]
 fn powershell_encoded_command(script: &str) -> String {
@@ -801,6 +803,14 @@ fn hermes_install_windows_command() -> String {
     format!(
         "powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand {}",
         powershell_encoded_command(HERMES_INSTALL_WINDOWS_SCRIPT)
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn grok_install_windows_command() -> String {
+    format!(
+        "powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand {}",
+        powershell_encoded_command(GROK_INSTALL_WINDOWS_SCRIPT)
     )
 }
 
@@ -2830,8 +2840,7 @@ fn brew_formula_from_path(real: &str) -> Option<String> {
 fn is_grok_native_install(bin_path: &str, real_target: &str) -> bool {
     [bin_path, real_target].iter().any(|path| {
         let normalized = path.replace('\\', "/").to_ascii_lowercase();
-        normalized.contains("/.grok/bin/")
-            || normalized.contains("/.grok/downloads/grok-")
+        normalized.contains("/.grok/bin/") || normalized.contains("/.grok/downloads/grok-")
     })
 }
 
@@ -4778,6 +4787,7 @@ fn build_windows_provider_command(app_type: &AppType, config_path_for_batch: &st
         AppType::GrokBuild => "grok".to_string(),
         AppType::OpenCode => "opencode".to_string(),
         AppType::OpenClaw => "openclaw".to_string(),
+        AppType::Pi => "pi".to_string(),
     }
 }
 
