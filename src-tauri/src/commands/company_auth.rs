@@ -245,7 +245,6 @@ fn company_codex_settings(entry: &CatalogEntry, login: &LoginResponse) -> Value 
         "model_provider = \"custom\"\n\
          model = {}\n\
          model_reasoning_effort = \"high\"\n\
-         disable_response_storage = false\n\
          experimental_realtime_webrtc_call_base_url = {}\n\
          experimental_realtime_ws_base_url = {}\n\
          \n\
@@ -253,8 +252,7 @@ fn company_codex_settings(entry: &CatalogEntry, login: &LoginResponse) -> Value 
          name = {}\n\
          base_url = {}\n\
          wire_api = \"responses\"\n\
-         requires_openai_auth = true\n\
-         supports_websockets = true\n",
+         requires_openai_auth = true\n",
         toml_string(&entry.default_model),
         toml_string(&base_url),
         toml_string(&base_url),
@@ -360,15 +358,8 @@ fn normalize_company_codex_config_text(config_text: &str) -> String {
                 r#"requires_openai_auth = false"#,
                 r#"requires_openai_auth = true"#,
             );
+        fallback = remove_config_key_lines(&fallback, &["disable_response_storage"]);
         let mut additions = String::new();
-        if !fallback.contains("disable_response_storage") {
-            additions.push_str("disable_response_storage = false\n");
-        } else {
-            fallback = fallback.replace(
-                "disable_response_storage = true",
-                "disable_response_storage = false",
-            );
-        }
         if let Some(base_url) = extract_codex_base_url_from_text(&fallback) {
             if !fallback.contains("experimental_realtime_webrtc_call_base_url") {
                 additions.push_str(&format!(
@@ -382,9 +373,6 @@ fn normalize_company_codex_config_text(config_text: &str) -> String {
                     toml_string(&base_url)
                 ));
             }
-        }
-        if !fallback.contains("supports_websockets") {
-            additions.push_str("supports_websockets = true\n");
         }
         fallback = insert_top_level_config_lines(&fallback, &additions);
         return fallback;
@@ -406,7 +394,7 @@ fn normalize_company_codex_config_text(config_text: &str) -> String {
         .or_else(|| doc.get("base_url").and_then(|item| item.as_str()))
         .map(codex_responses_base_url);
 
-    doc["disable_response_storage"] = toml_edit::value(false);
+    doc.as_table_mut().remove("disable_response_storage");
     if let Some(base_url) = realtime_base_url {
         doc["experimental_realtime_webrtc_call_base_url"] = toml_edit::value(base_url.clone());
         doc["experimental_realtime_ws_base_url"] = toml_edit::value(base_url);
@@ -420,20 +408,31 @@ fn normalize_company_codex_config_text(config_text: &str) -> String {
     {
         table["wire_api"] = toml_edit::value("responses");
         table["requires_openai_auth"] = toml_edit::value(true);
-        table["supports_websockets"] = toml_edit::value(true);
         if let Some(base_url) = table.get("base_url").and_then(|item| item.as_str()) {
             table["base_url"] = toml_edit::value(codex_responses_base_url(base_url));
         }
     } else {
         doc["wire_api"] = toml_edit::value("responses");
         doc["requires_openai_auth"] = toml_edit::value(true);
-        doc["supports_websockets"] = toml_edit::value(true);
         if let Some(base_url) = doc.get("base_url").and_then(|item| item.as_str()) {
             doc["base_url"] = toml_edit::value(codex_responses_base_url(base_url));
         }
     }
 
     doc.to_string()
+}
+
+fn remove_config_key_lines(config_text: &str, keys: &[&str]) -> String {
+    config_text
+        .split_inclusive('\n')
+        .filter(|line| {
+            let trimmed = line.trim();
+            let Some((key, _)) = trimmed.split_once('=') else {
+                return true;
+            };
+            !keys.iter().any(|candidate| key.trim() == *candidate)
+        })
+        .collect()
 }
 
 fn codex_responses_base_url(base_url: &str) -> String {
@@ -609,7 +608,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_company_codex_config_enables_websocket_and_response_storage() {
+    fn generated_company_codex_config_does_not_force_websocket_or_response_storage() {
         let value = company_codex_settings(&sample_entry(), &sample_login());
         let config = value
             .get("config")
@@ -619,12 +618,7 @@ mod tests {
             .parse::<DocumentMut>()
             .expect("generated config must be valid TOML");
 
-        assert_eq!(
-            document
-                .get("disable_response_storage")
-                .and_then(|item| item.as_bool()),
-            Some(false)
-        );
+        assert!(document.get("disable_response_storage").is_none());
         assert_eq!(
             document
                 .get("experimental_realtime_webrtc_call_base_url")
@@ -641,20 +635,22 @@ mod tests {
             document["model_providers"]["custom"]["name"].as_str(),
             Some("Company Codex")
         );
-        assert_eq!(
-            document["model_providers"]["custom"]["supports_websockets"].as_bool(),
-            Some(true)
-        );
+        assert!(document["model_providers"]["custom"]
+            .as_table()
+            .expect("custom provider table")
+            .get("supports_websockets")
+            .is_none());
     }
 
     #[test]
-    fn normalizing_existing_company_codex_config_enables_websocket_and_response_storage() {
+    fn normalizing_existing_company_codex_config_preserves_manual_websocket_setting() {
         let input = r#"model_provider = "custom"
 disable_response_storage = true
 
 [model_providers.custom]
 wire_api = "chat"
 requires_openai_auth = false
+supports_websockets = true
 base_url = "https://leharrt.com"
 "#;
 
@@ -663,12 +659,7 @@ base_url = "https://leharrt.com"
             .parse::<DocumentMut>()
             .expect("normalized config must be valid TOML");
 
-        assert_eq!(
-            document
-                .get("disable_response_storage")
-                .and_then(|item| item.as_bool()),
-            Some(false)
-        );
+        assert!(document.get("disable_response_storage").is_none());
         assert_eq!(
             document
                 .get("experimental_realtime_webrtc_call_base_url")
@@ -690,7 +681,11 @@ base_url = "https://leharrt.com"
             Some(true)
         );
         assert_eq!(
-            document["model_providers"]["custom"]["supports_websockets"].as_bool(),
+            document["model_providers"]["custom"]
+                .as_table()
+                .expect("custom provider table")
+                .get("supports_websockets")
+                .and_then(|item| item.as_bool()),
             Some(true)
         );
     }
