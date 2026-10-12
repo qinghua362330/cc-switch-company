@@ -1,0 +1,288 @@
+name: Upstream Sync
+
+# 全自动同步上游：定时/手动拉取 farion1231/cc-switch 的 main，
+# 合并进公司分支；合并成功且校验通过则自动计算 tag 并推送，
+# tag 推送会触发 company-release.yml 出包（Windows MSI + macOS tar.gz），
+# 出包完成后客户端即可通过 latest-company.json 收到自动更新。
+#
+# 冲突或校验失败时不推送、不发 tag，改为开 issue 通知人工介入。
+
+on:
+  schedule:
+    # 每天 03:17 UTC（北京时间 11:17）检查一次上游
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "auto = 合并成功后自动打 tag 发版；prepare = 只合并并开 PR，不打 tag"
+        required: true
+        default: "auto"
+        type: choice
+        options: [auto, prepare]
+      upstream_ref:
+        description: "上游 ref（默认 main，可填 tag 如 v4.0.7）"
+        required: false
+        default: "main"
+        type: string
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: farion1231/cc-switch
+  NODE_VERSION: "22.12.0"
+  PNPM_VERSION: "10.12.3"
+
+jobs:
+  sync:
+    name: Sync upstream into company fork
+    runs-on: ubuntu-22.04
+    outputs:
+      result: ${{ steps.outcome.outputs.result }}
+      version: ${{ steps.outcome.outputs.version }}
+      tag: ${{ steps.outcome.outputs.tag }}
+      upstream_version: ${{ steps.outcome.outputs.upstream_version }}
+
+    steps:
+      - name: Checkout company fork
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          # 需要能 push tag，用默认 GITHUB_TOKEN 即可（contents: write）
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git identity
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote and fetch
+        id: fetch
+        run: |
+          set -euo pipefail
+          REF="${{ github.event.inputs.upstream_ref || 'main' }}"
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" 2>/dev/null || true
+          git fetch --no-tags upstream "$REF"
+          UPSTREAM_SHA="$(git rev-parse FETCH_HEAD)"
+          echo "sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
+          echo "Upstream ${UPSTREAM_REPO}@${REF} = ${UPSTREAM_SHA}"
+
+      - name: Decide whether sync is needed
+        id: need
+        run: |
+          set -euo pipefail
+          BASE="$(git merge-base HEAD FETCH_HEAD)"
+          AHEAD="$(git rev-list --count ${BASE}..FETCH_HEAD)"
+          echo "ahead=$AHEAD" >> "$GITHUB_OUTPUT"
+          if [ "$AHEAD" -eq 0 ]; then
+            echo "已是最新，无需同步"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "上游领先 ${AHEAD} 个提交，开始同步"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Attempt merge
+        id: merge
+        if: steps.need.outputs.skip == 'false'
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          git merge --no-edit FETCH_HEAD
+          echo "clean=true" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Collect conflict list
+        id: conflicts
+        if: steps.need.outputs.skip == 'false' && steps.merge.outcome == 'failure'
+        run: |
+          set -uo pipefail
+          {
+            echo "files<<EOF"
+            git diff --name-only --diff-filter=U | head -60
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "count=$(git diff --name-only --diff-filter=U | wc -l)" >> "$GITHUB_OUTPUT"
+
+      - name: Abort merge on conflict
+        if: steps.need.outputs.skip == 'false' && steps.merge.outcome == 'failure'
+        run: git merge --abort
+
+      - name: Setup pnpm
+        if: steps.merge.outcome == 'success'
+        uses: pnpm/action-setup@v6
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+
+      - name: Setup Node
+        if: steps.merge.outcome == 'success'
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        if: steps.merge.outcome == 'success'
+        run: pnpm install --frozen-lockfile
+
+      - name: TypeScript type check
+        id: typecheck
+        if: steps.merge.outcome == 'success'
+        continue-on-error: true
+        run: pnpm typecheck
+
+      - name: Unit tests
+        id: unittests
+        if: steps.merge.outcome == 'success'
+        continue-on-error: true
+        run: pnpm test:unit
+
+      - name: Setup Rust
+        if: steps.merge.outcome == 'success' && steps.typecheck.outcome == 'success' && steps.unittests.outcome == 'success'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux system deps
+        if: steps.merge.outcome == 'success' && steps.typecheck.outcome == 'success' && steps.unittests.outcome == 'success'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
+            librsvg2-dev patchelf libgtk-3-dev
+
+      - name: Cargo check
+        id: cargocheck
+        if: steps.merge.outcome == 'success' && steps.typecheck.outcome == 'success' && steps.unittests.outcome == 'success'
+        continue-on-error: true
+        run: |
+          mkdir -p dist && touch dist/.gitkeep
+          cargo check --manifest-path src-tauri/Cargo.toml
+
+      - name: Read versions
+        id: versions
+        if: steps.merge.outcome == 'success'
+        run: |
+          set -euo pipefail
+          PKG="$(node -p "require('./package.json').version")"
+          echo "package_version=$PKG" >> "$GITHUB_OUTPUT"
+          UPSTREAM_VERSION="$(git show FETCH_HEAD:package.json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).version))')"
+          echo "upstream_version=$UPSTREAM_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Compute release tag
+        id: tag
+        if: steps.merge.outcome == 'success' && steps.typecheck.outcome == 'success' && steps.unittests.outcome == 'success' && steps.cargocheck.outcome == 'success'
+        run: |
+          set -euo pipefail
+          V="${{ steps.versions.outputs.package_version }}"
+          # tag 格式必须匹配 company-release.yml 的 v<package.json 版本>-company.<正整数>
+          N=1
+          while git rev-parse "refs/tags/v${V}-company.${N}" >/dev/null 2>&1; do
+            N=$((N + 1))
+          done
+          echo "tag=v${V}-company.${N}" >> "$GITHUB_OUTPUT"
+          echo "将创建 tag v${V}-company.${N}"
+
+      - name: Push merge commit
+        id: push
+        if: steps.merge.outcome == 'success' && steps.typecheck.outcome == 'success' && steps.unittests.outcome == 'success' && steps.cargocheck.outcome == 'success'
+        run: |
+          set -euo pipefail
+          git push origin HEAD:main
+
+      - name: Push tag to trigger release
+        if: steps.tag.outputs.tag != '' && (github.event.inputs.mode || 'auto') == 'auto'
+        run: |
+          set -euo pipefail
+          git tag "${{ steps.tag.outputs.tag }}"
+          git push origin "${{ steps.tag.outputs.tag }}"
+          echo "已推送 tag，company-release.yml 将开始出包"
+
+      - name: Open PR instead of tagging (prepare mode)
+        if: steps.push.outcome == 'success' && github.event.inputs.mode == 'prepare'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr create --base main --head "${{ github.ref_name }}" \
+            --title "chore(sync): 上游 v${{ steps.versions.outputs.upstream_version }} 同步" \
+            --body "本 PR 由 upstream-sync 自动生成，已通过 typecheck / unit tests / cargo check。合并后请手动打 tag 触发 company-release.yml。" \
+            || echo "PR 创建失败（可能无差异），忽略"
+
+      - name: Summarize outcome
+        id: outcome
+        if: always()
+        run: |
+          set -uo pipefail
+          TYPE="${{ steps.typecheck.outcome }}"
+          UNIT="${{ steps.unittests.outcome }}"
+          CARGO="${{ steps.cargocheck.outcome }}"
+          MERGE="${{ steps.merge.outcome }}"
+          SKIP="${{ steps.need.outputs.skip }}"
+          RESULT="unknown"
+          if [ "$SKIP" = "true" ]; then RESULT="up-to-date"
+          elif [ "$MERGE" = "failure" ]; then RESULT="conflict"
+          elif [ "$TYPE" = "success" ] && [ "$UNIT" = "success" ] && [ "$CARGO" = "success" ]; then RESULT="released"
+          elif [ "$MERGE" = "success" ]; then RESULT="verification-failed"
+          fi
+          {
+            echo "result=$RESULT"
+            echo "version=${{ steps.versions.outputs.package_version }}"
+            echo "tag=${{ steps.tag.outputs.tag }}"
+            echo "upstream_version=${{ steps.versions.outputs.upstream_version }}"
+          } >> "$GITHUB_OUTPUT"
+          echo "同步结果: $RESULT"
+
+      - name: Write issue bodies
+        if: always()
+        run: |
+          mkdir -p /tmp/sync-issue
+
+          cat > /tmp/sync-issue/conflict.md <<'MD'
+          自动同步上游时发生合并冲突，**未推送任何改动**，公司仓库保持原状。
+
+          冲突文件见下方代码块。
+
+          MD
+
+          {
+            echo ""
+            echo '```'
+            git diff --name-only --diff-filter=U 2>/dev/null | head -60 || true
+            echo '```'
+            echo ""
+            echo "处理方式："
+            echo "1. \`git remote add upstream https://github.com/farion1231/cc-switch.git && git fetch upstream main\`"
+            echo "2. \`git merge upstream/main\` 手工解冲突"
+            echo "3. 解决后推送 main，再打 \`v<package.json 版本>-company.<N>\` tag 触发发版"
+          } >> /tmp/sync-issue/conflict.md
+
+          cat > /tmp/sync-issue/verify.md <<'MD'
+          合并**已成功**但校验未全绿，**未推送、未打 tag**。
+
+          请查看本次 workflow 运行的日志定位失败原因。
+
+          MD
+
+      - name: Open issue on conflict
+        if: steps.outcome.outputs.result == 'conflict'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create \
+            --title "上游同步冲突：需人工合并" \
+            --body-file /tmp/sync-issue/conflict.md \
+            || gh issue create --title "上游同步冲突：需人工合并" --body-file /tmp/sync-issue/conflict.md
+
+      - name: Open issue on verification failure
+        if: steps.outcome.outputs.result == 'verification-failed'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create \
+            --title "上游同步后校验失败（typecheck / 单测 / cargo check）" \
+            --body-file /tmp/sync-issue/verify.md \
+            || gh issue create --title "上游同步后校验失败" --body-file /tmp/sync-issue/verify.md

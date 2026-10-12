@@ -1,4 +1,5 @@
 import { mkdirSync, writeFileSync } from "node:fs";
+import { UpdateProvider } from "@/contexts/UpdateContext";
 import { join } from "node:path";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
@@ -46,7 +47,9 @@ const renderApp = async () => {
 
   return render(
     <QueryClientProvider client={client}>
-      <App />
+      <UpdateProvider>
+        <App />
+      </UpdateProvider>
     </QueryClientProvider>,
   );
 };

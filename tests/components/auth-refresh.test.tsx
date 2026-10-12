@@ -1,4 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { UpdateProvider } from "@/contexts/UpdateContext";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -35,7 +36,9 @@ const renderApp = async () => {
 
   return render(
     <QueryClientProvider client={client}>
-      <App />
+      <UpdateProvider>
+        <App />
+      </UpdateProvider>
     </QueryClientProvider>,
   );
 };

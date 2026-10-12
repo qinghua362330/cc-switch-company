@@ -38,17 +38,31 @@ export function toCompanyAuthError(error: unknown): CompanyAuthError {
         : "";
   const lower = raw.toLowerCase();
 
-  if (
-    lower.includes("401") ||
-    lower.includes("invalid") ||
-    lower.includes("unauthorized")
-  ) {
+  // 后端 AuthError::to_command_error() 输出 "kind: message"，按 kind 精确识别。
+  // 注意顺序：会话过期(401 → unauthorized)必须排在 invalid 之前，
+  // 否则会被误报成 ticket 问题，让用户去重新拿 ticket 而不是重新登录。
+  if (lower.startsWith("unauthorized:") || lower.includes("登录已失效")) {
+    return new CompanyAuthError("登录已失效，请重新登录。", "session_expired");
+  }
+  if (lower.startsWith("not_authenticated:")) {
+    return new CompanyAuthError("尚未登录，请先登录。", "session_expired");
+  }
+  if (lower.startsWith("server:") || lower.includes("认证服务暂时不可用")) {
+    return new CompanyAuthError("认证服务暂时不可用，请稍后重试。", "network");
+  }
+  if (lower.startsWith("malformed_response:")) {
+    return new CompanyAuthError(
+      "认证服务返回格式异常，请稍后重试。",
+      "malformed",
+    );
+  }
+  if (lower.includes("401") || lower.includes("invalid")) {
     return new CompanyAuthError(
       "Ticket 无效或已过期，请重新获取。",
       "invalid_ticket",
     );
   }
-  if (lower.includes("403") || lower.includes("forbidden")) {
+  if (lower.startsWith("forbidden:") || lower.includes("403") || lower.includes("forbidden")) {
     return new CompanyAuthError(
       "当前飞书租户无权限使用公司客户端。",
       "forbidden",

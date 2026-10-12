@@ -39,6 +39,7 @@ export class CompanyAuthError extends Error {
     message: string,
     public readonly kind:
       | "invalid_ticket"
+      | "session_expired"
       | "forbidden"
       | "network"
       | "malformed"

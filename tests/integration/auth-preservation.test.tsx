@@ -1,4 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { UpdateProvider } from "@/contexts/UpdateContext";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
@@ -73,7 +74,9 @@ const renderApp = async () => {
 
   return render(
     <QueryClientProvider client={client}>
-      <App />
+      <UpdateProvider>
+        <App />
+      </UpdateProvider>
     </QueryClientProvider>,
   );
 };
