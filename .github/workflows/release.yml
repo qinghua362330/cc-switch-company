@@ -22,6 +22,9 @@ jobs:
   # 所以这里自己跑一遍检查所有随包摘要的那份单测。
   whats-new-check:
     name: Check in-app what's new summaries
+    # 公司发布走 company-release.yml；上游 tag 过滤里的 '!v*-company*' 对 tag 不生效，
+    # 必须在这里跳过，否则公司 tag 会触发上游发布并因缺少 src/whats-new 摘要而失败。
+    if: ${{ !contains(github.ref_name, '-company.') }}
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
@@ -72,6 +75,8 @@ jobs:
 
   release:
     needs: whats-new-check
+    # 公司 tag 由 company-release.yml 负责，这里整体跳过（见 whats-new-check 注释）。
+    if: ${{ !contains(github.ref_name, '-company.') }}
     runs-on: ${{ matrix.os }}
     environment: release
     strategy:
@@ -365,6 +370,7 @@ jobs:
   macos-binary:
     name: Build macOS binary (${{ matrix.target }})
     needs: whats-new-check
+    if: ${{ !contains(github.ref_name, '-company.') }}
     runs-on: macos-14
     environment: release
     strategy:
@@ -439,6 +445,7 @@ jobs:
     name: Bundle macOS release
     runs-on: macos-14
     needs: macos-binary
+    if: ${{ !contains(github.ref_name, '-company.') }}
 
     steps:
       - name: Checkout
@@ -793,7 +800,7 @@ jobs:
     needs: [release, macos-release]
     # 只有推 tag 才发布。手动触发时也能选 tag 作为运行版本，单看 ref_type 会把干跑当成正式发布，
     # 覆盖已发布 release 的正文和安装包
-    if: github.event_name == 'push' && github.ref_type == 'tag'
+    if: github.event_name == 'push' && github.ref_type == 'tag' && !contains(github.ref_name, '-company.')
     permissions:
       contents: write
     steps:
