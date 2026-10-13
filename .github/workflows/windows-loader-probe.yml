@@ -1,0 +1,73 @@
+name: Windows loader probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      artifact_run_id:
+        description: "Failed CI run containing Windows test loader diagnostics"
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  probe:
+    runs-on: windows-2025
+    timeout-minutes: 10
+    steps:
+      - name: Download failed test loader diagnostics
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ inputs.artifact_run_id }}
+        run: |
+          if ($env:RUN_ID -notmatch '^[1-9][0-9]*$') { throw 'Invalid run ID' }
+          gh run download $env:RUN_ID --repo $env:GITHUB_REPOSITORY --name windows-test-loader-windows-latest --dir diagnostics
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Check imported Windows procedures
+        shell: pwsh
+        run: |
+          Add-Type @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class LoaderProbe {
+            [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+            public static extern IntPtr LoadLibraryExW(string name, IntPtr file, uint flags);
+            [DllImport("kernel32.dll", CharSet = CharSet.Ansi, ExactSpelling = true, SetLastError = true)]
+            public static extern IntPtr GetProcAddress(IntPtr module, string name);
+          }
+          '@
+          $dll = ''
+          $module = [IntPtr]::Zero
+          $checked = 0
+          $missing = 0
+          foreach ($line in Get-Content diagnostics/imports.txt) {
+            if ($line -match '^\s+([A-Za-z0-9_.-]+\.dll)\s*$') {
+              $dll = $Matches[1]
+              # Only load Windows system libraries, not artifact-supplied DLLs.
+              $module = [LoaderProbe]::LoadLibraryExW($dll, [IntPtr]::Zero, 0x800)
+              if ($module -eq [IntPtr]::Zero) {
+                Write-Host "MISSING DLL: $dll error=$([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+                $missing++
+              }
+            } elseif ($dll -and $line -match '^\s+[0-9A-Fa-f]{1,4}\s+(\S+)\s*$') {
+              $symbol = $Matches[1]
+              $checked++
+              if ($module -ne [IntPtr]::Zero -and [LoaderProbe]::GetProcAddress($module, $symbol) -eq [IntPtr]::Zero) {
+                Write-Host "MISSING PROCEDURE: $dll!$symbol error=$([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+                $missing++
+              }
+            }
+          }
+          if ($checked -lt 100) { throw "Import parser did not cover the test executable: $checked" }
+          Write-Host "Checked $checked imported procedures; missing=$missing"
+          $exe = Get-ChildItem diagnostics -Filter 'cc_switch_lib-*.exe' | Select-Object -First 1
+          if (-not $exe) { throw 'Missing failed test executable' }
+          $listing = & $exe.FullName --list 2>&1
+          $code = $LASTEXITCODE
+          Write-Host "Copied test executable discovery exit: $code"
+          $listing | Select-Object -First 5 | Write-Host
+          if ($code -ne 0 -or $missing -ne 0) { exit 1 }
