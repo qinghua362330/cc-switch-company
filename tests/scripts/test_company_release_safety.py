@@ -297,6 +297,20 @@ resolve_from_metadata "$ARCH"
         self.assertIn('version = "4.0.10-company.2"', (self.home / 'src-tauri/Cargo.toml').read_text())
         self.assertIn('name = "other"\nversion = "1.2.3"', (self.home / 'src-tauri/Cargo.lock').read_text())
 
+    def test_runner_version_accepts_windows_crlf_without_changing_dependencies(self):
+        (self.home / 'src-tauri').mkdir()
+        (self.home / 'package.json').write_text('{"version":"4.0.10"}')
+        (self.home / 'src-tauri/tauri.conf.json').write_text('{"version":"4.0.10","bundle":{"windows":{"wix":{}}}}')
+        toml = '[package]\r\nname = "cc-switch"\r\nversion = "4.0.10"\r\n'
+        lock = '[[package]]\r\nname = "cc-switch"\r\nversion = "4.0.10"\r\n\r\n[[package]]\r\nname = "other"\r\nversion = "1.2.3"\r\n'
+        (self.home / 'src-tauri/Cargo.toml').write_bytes(toml.encode())
+        (self.home / 'src-tauri/Cargo.lock').write_bytes(lock.encode())
+        result = self.bash(workflow_step('company-release.yml', 'Prepare company build version'), VERSION='4.0.10-company.2', UPSTREAM_VERSION='4.0.10', COMPANY_ITERATION='2')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        expected = lock.replace('version = "4.0.10"', 'version = "4.0.10-company.2"')
+        self.assertEqual((self.home / 'src-tauri/Cargo.lock').read_bytes(), expected.encode())
+        self.assertIn(b'version = "4.0.10-company.2"', (self.home / 'src-tauri/Cargo.toml').read_bytes())
+
     def test_manifest_fixture_contains_complete_company_identity(self):
         assets = self.home / 'release-assets'; assets.mkdir()
         for name in ['fixture-Windows-company-x64.msi', 'fixture-macOS-company-universal.tar.gz']:

@@ -167,7 +167,7 @@ jobs:
             // Restrict the replacement to the application's package, not dependency versions.
             const pattern = section === 'package'
               ? /(\[package\][\s\S]*?^version\s*=\s*")([^"]+)(")/m
-              : /(\[\[package\]\]\nname = "cc-switch"\nversion = ")([^"]+)(")/;
+              : /(\[\[package\]\]\r?\nname = "cc-switch"\r?\nversion = ")([^"]+)(")/;
             let replaced = false;
             const updated = text.replace(pattern, (_, prefix, old, suffix) => {
               if (old !== base) throw new Error(`Unexpected base version in ${file}`);
