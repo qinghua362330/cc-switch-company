@@ -149,6 +149,43 @@ beforeEach(() => {
 });
 
 describe("useProviderActions", () => {
+  it.each([false, true])(
+    "shows history recovery guidance separately from backfill warnings (mixed=%s)",
+    async (mixed) => {
+      const guidance =
+        "Codex 历史统一检查已延期（codex_writer_active）；停止 Codex 后，下次切换供应商或启动 CC Switch 时重试";
+      switchProviderMutateAsync.mockResolvedValueOnce({
+        warnings: [
+          `codex_history_migration_pending: ${guidance}`,
+          ...(mixed
+            ? ["codex_auth_cleanup_failed: fixture", "backfill fixture"]
+            : []),
+        ],
+      });
+      const { wrapper } = createWrapper();
+      const { result } = renderHook(() => useProviderActions("codex"), {
+        wrapper,
+      });
+      await act(async () => {
+        await result.current.switchProvider(
+          createProvider({ category: "custom" }),
+        );
+      });
+      expect(toastWarningMock).toHaveBeenCalledWith(guidance, {
+        duration: 8000,
+      });
+      const messages = toastWarningMock.mock.calls.map(
+        ([message]) => message as string,
+      );
+      expect(
+        messages.some((message) => message.includes("旧供应商配置回填失败")),
+      ).toBe(mixed);
+      expect(
+        messages.some((message) => message.includes("官方登录凭据仍留在磁盘")),
+      ).toBe(mixed);
+    },
+  );
+
   it("should trigger mutation when calling addProvider", async () => {
     addProviderMutateAsync.mockResolvedValueOnce(undefined);
     const { wrapper } = createWrapper();

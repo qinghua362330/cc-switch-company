@@ -164,7 +164,7 @@ fn switch_provider_internal(
                         reason.as_str(),
                         "already_migrated" | "unify_toggle_off" | "stock_migration_not_requested"
                     ) {
-                        let warning = format!("Codex 历史统一检查已延期（{reason}）；停止 Codex 后，下次切换供应商或启动 CC Switch 时重试");
+                        let warning = format!("codex_history_migration_pending: Codex 历史统一检查已延期（{reason}）；停止 Codex 后，下次切换供应商或启动 CC Switch 时重试");
                         log::warn!("{warning}");
                         result.warnings.push(warning);
                     }
@@ -177,7 +177,7 @@ fn switch_provider_internal(
                 }
             }
             Err(error) => {
-                let warning = format!("Codex 历史统一检查/迁移未能完成：{error}；停止 Codex 后，下次切换供应商或启动 CC Switch 时重试");
+                let warning = format!("codex_history_migration_pending: Codex 历史统一检查/迁移未能完成：{error}；停止 Codex 后，下次切换供应商或启动 CC Switch 时重试");
                 log::warn!("{warning}");
                 result.warnings.push(warning);
             }

@@ -243,12 +243,23 @@ export function useProviderActions(
         // message for an auth-cleanup warning would point the user at the
         // wrong problem entirely.
         if (result?.warnings?.length) {
+          const historyPrefix = "codex_history_migration_pending:";
+          const historyWarnings = result.warnings.filter((warning) =>
+            warning.startsWith(historyPrefix),
+          );
           const authCleanupFailed = result.warnings.some((warning) =>
             warning.startsWith("codex_auth_cleanup_failed"),
           );
           const hasOtherWarnings = result.warnings.some(
-            (warning) => !warning.startsWith("codex_auth_cleanup_failed"),
+            (warning) =>
+              !warning.startsWith("codex_auth_cleanup_failed") &&
+              !warning.startsWith(historyPrefix),
           );
+          for (const warning of historyWarnings) {
+            toast.warning(warning.slice(historyPrefix.length).trim(), {
+              duration: 8000,
+            });
+          }
           if (authCleanupFailed) {
             toast.warning(
               t("notifications.codexAuthCleanupFailed", {
