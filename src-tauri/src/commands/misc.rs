@@ -130,7 +130,7 @@ pub async fn open_codex_app() -> Result<bool, String> {
             let stderr = decode_command_output(&output.stderr);
             return Err(format!("重启 {app_name} 应用失败: {stderr}"));
         }
-        return Ok(true);
+        Ok(true)
     }
 
     #[cfg(target_os = "windows")]
@@ -148,7 +148,7 @@ pub async fn open_codex_app() -> Result<bool, String> {
                 Err(e) => last_err = e.to_string(),
             }
         }
-        return Err(format!("启动 Codex/ChatGPT 应用失败: {last_err}"));
+        Err(format!("启动 Codex/ChatGPT 应用失败: {last_err}"))
     }
 
     #[cfg(target_os = "linux")]
@@ -1265,7 +1265,7 @@ fn build_tool_action_line(
         // (npm/pnpm)或 .exe(volta),静态命令头部是 `npm`(也是 .cmd)、`py` 等——
         // 全部加 `call ` 前缀,风格统一且语义正确。含空格的头部已被 `win_quote_path_for_batch`
         // 加上双引号,call 对带引号的路径解析正常。
-        return Ok(format!("call {command}"));
+        Ok(format!("call {command}"))
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -1839,6 +1839,7 @@ fn default_flag_for_shell(shell: &str) -> &'static str {
     }
 }
 
+#[cfg(any(unix, test))]
 fn fallback_user_shell() -> &'static str {
     if cfg!(target_os = "macos") {
         "/bin/zsh"
@@ -1847,6 +1848,7 @@ fn fallback_user_shell() -> &'static str {
     }
 }
 
+#[cfg(any(unix, test))]
 fn valid_user_shell_path(shell: &str) -> bool {
     if shell.is_empty()
         || !shell.starts_with('/')
@@ -1869,12 +1871,13 @@ fn is_executable_file(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-#[cfg(not(unix))]
+#[cfg(all(not(unix), test))]
 fn is_executable_file(path: &std::path::Path) -> bool {
     path.is_file()
 }
 
 /// 获取用户默认 shell 的完整路径；异常或被污染的 SHELL 回退到平台默认值。
+#[cfg(any(unix, test))]
 fn get_user_shell() -> String {
     std::env::var("SHELL")
         .ok()
@@ -1883,6 +1886,7 @@ fn get_user_shell() -> String {
 }
 
 /// 构建 exec 行：引号保护 shell 路径，交还用户 shell 让其按默认规则加载 rc 配置。
+#[cfg(any(unix, test))]
 fn build_exec_line(shell: &str, cwd: Option<&Path>) -> String {
     let quoted_shell = shell_single_quote(shell);
 
@@ -1901,6 +1905,7 @@ fn build_exec_line(shell: &str, cwd: Option<&Path>) -> String {
     }
 }
 
+#[cfg(any(unix, test))]
 fn provider_command_for_app(app_type: &AppType, config_path: &str) -> String {
     match app_type {
         AppType::Claude | AppType::ClaudeDesktop | AppType::Hermes => {
@@ -1916,6 +1921,7 @@ fn provider_command_for_app(app_type: &AppType, config_path: &str) -> String {
     }
 }
 
+#[cfg(any(unix, test))]
 fn build_provider_command_line(
     shell: &str,
     config_path: &str,
@@ -1941,6 +1947,7 @@ fn build_provider_command_line(
     )
 }
 
+#[cfg(any(unix, test))]
 fn provider_command_flag_for_shell(shell: &str) -> &'static str {
     match shell.rsplit('/').next().unwrap_or(shell) {
         "dash" | "sh" => "-c",
@@ -1949,6 +1956,7 @@ fn provider_command_flag_for_shell(shell: &str) -> &'static str {
     }
 }
 
+#[cfg(any(unix, test))]
 fn build_final_shell_cd_command(shell: &str, cwd: Option<&Path>) -> String {
     if matches!(shell.rsplit('/').next().unwrap_or(shell), "zsh") {
         return String::new();
@@ -4865,7 +4873,7 @@ fn launch_terminal_with_env(
     #[cfg(target_os = "windows")]
     {
         launch_windows_terminal(&temp_dir, &config_file, app_type, cwd)?;
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]

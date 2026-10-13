@@ -13,6 +13,7 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 concurrency:
   group: company-release-${{ github.event.inputs.tag || github.ref_name }}
@@ -358,6 +359,22 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ needs.resolve.outputs.build_sha }}
+
+      - name: Require successful CI for release source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BUILD_SHA: ${{ needs.resolve.outputs.build_sha }}
+        run: |
+          set -euo pipefail
+          run_id="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml \
+            --commit "$BUILD_SHA" --event push --limit 20 \
+            --json databaseId --jq '.[0].databaseId // empty')"
+          if [[ ! "$run_id" =~ ^[1-9][0-9]*$ ]]; then
+            echo "No valid push CI run found for release source $BUILD_SHA" >&2
+            exit 1
+          fi
+          gh run watch "$run_id" --repo "$GITHUB_REPOSITORY" --exit-status --interval 30
 
       - name: Download artifacts
         uses: actions/download-artifact@v4

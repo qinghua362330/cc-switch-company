@@ -257,7 +257,9 @@ describe("DeepLinkImportDialog", () => {
       const sent = captureImport();
       const user = userEvent.setup();
       render(<DeepLinkImportDialog />, { wrapper: Wrapper });
-      act(() => deliverDeepLink(providerLink({ app: "claude", enabled: true })));
+      act(() =>
+        deliverDeepLink(providerLink({ app: "claude", enabled: true })),
+      );
 
       const toggle = await screen.findByRole("switch");
       expect(toggle).toBeChecked();
@@ -284,7 +286,9 @@ describe("DeepLinkImportDialog", () => {
 
       const toggle = await screen.findByRole("switch");
       expect(toggle).not.toBeChecked();
-      expect(screen.getByText("deeplink.switchAfterImport")).toBeInTheDocument();
+      expect(
+        screen.getByText("deeplink.switchAfterImport"),
+      ).toBeInTheDocument();
 
       await user.click(toggle);
       expect(
@@ -300,10 +304,12 @@ describe("DeepLinkImportDialog", () => {
       act(() => deliverDeepLink(providerLink({ app: "opencode" })));
 
       const toggle = await screen.findByRole("switch");
-      expect(toggle).toBeChecked();
-      expect(
-        screen.getByText("deeplink.addToAppAfterImport"),
-      ).toBeInTheDocument();
+      await waitFor(() => {
+        expect(toggle).toBeChecked();
+        expect(
+          screen.getByText("deeplink.addToAppAfterImport"),
+        ).toBeInTheDocument();
+      });
       // 累加式应用没有「切换」，不提示改发请求
       expect(
         screen.queryByText("deeplink.providerEnabledWarning"),
@@ -326,10 +332,12 @@ describe("DeepLinkImportDialog", () => {
       );
 
       const toggle = await screen.findByRole("switch");
-      expect(toggle).toBeChecked();
-      expect(
-        screen.getByText("deeplink.prompt.enabledWarning"),
-      ).toBeInTheDocument();
+      await waitFor(() => {
+        expect(toggle).toBeChecked();
+        expect(
+          screen.getByText("deeplink.prompt.enabledWarning"),
+        ).toBeInTheDocument();
+      });
 
       await user.click(toggle);
       await user.click(screen.getByRole("button", { name: "deeplink.import" }));

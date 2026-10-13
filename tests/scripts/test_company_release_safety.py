@@ -311,6 +311,17 @@ resolve_from_metadata "$ARCH"
         self.assertEqual((self.home / 'src-tauri/Cargo.lock').read_bytes(), expected.encode())
         self.assertIn(b'version = "4.0.10-company.2"', (self.home / 'src-tauri/Cargo.toml').read_bytes())
 
+    def test_publish_requires_successful_ci_for_release_commit(self):
+        self.mock_command('gh', 'printf "%s\\n" "$*" >> "$CC_SWITCH_TEST_HOME/gh-calls"\nif [ "$2" = list ]; then echo "${CI_RUN_ID:-123}"; else exit "${CI_EXIT:-0}"; fi')
+        code = workflow_step('company-release.yml', 'Require successful CI for release source')
+        result = self.bash(code, BUILD_SHA='fixture-sha', GITHUB_REPOSITORY='fixture/repository')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = (self.home / 'gh-calls').read_text()
+        self.assertIn('--commit fixture-sha --event push', calls)
+        self.assertIn('run watch 123 --repo fixture/repository --exit-status', calls)
+        self.assertNotEqual(self.bash(code, BUILD_SHA='fixture-sha', GITHUB_REPOSITORY='fixture/repository', CI_EXIT='1').returncode, 0)
+        self.assertNotEqual(self.bash(code, BUILD_SHA='fixture-sha', GITHUB_REPOSITORY='fixture/repository', CI_RUN_ID=' ').returncode, 0)
+
     def test_manifest_fixture_contains_complete_company_identity(self):
         assets = self.home / 'release-assets'; assets.mkdir()
         for name in ['fixture-Windows-company-x64.msi', 'fixture-macOS-company-universal.tar.gz']:

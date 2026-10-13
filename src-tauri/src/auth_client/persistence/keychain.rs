@@ -1,6 +1,8 @@
 use crate::auth_client::models::{AuthError, AuthSecrets};
 
+#[cfg(target_os = "macos")]
 const KEYCHAIN_SERVICE: &str = "cc-switch-company-auth";
+#[cfg(target_os = "macos")]
 const KEYCHAIN_ACCOUNT: &str = "default";
 
 #[cfg(target_os = "macos")]
