@@ -2739,9 +2739,7 @@ impl RequestForwarder {
             } else if !self.non_streaming_timeout.is_zero() {
                 request = request.timeout(self.non_streaming_timeout);
             }
-            for (key, value) in &ordered_headers {
-                request = request.header(key, value);
-            }
+            request = apply_reqwest_forward_headers(request, &ordered_headers);
             let send = request.body(body_bytes).send();
             let send_result = if request_is_streaming {
                 let header_timeout = if self.streaming_first_byte_timeout.is_zero() {
@@ -4181,6 +4179,21 @@ fn headers_contain_proxy_placeholder(headers: &http::HeaderMap) -> bool {
     })
 }
 
+fn apply_reqwest_forward_headers(
+    mut request: reqwest::RequestBuilder,
+    headers: &http::HeaderMap,
+) -> reqwest::RequestBuilder {
+    for (key, value) in headers {
+        // reqwest derives HTTP/1 Host and HTTP/2 :authority from the URL.
+        // Forwarding Host too makes strict HTTP/2 upstreams reject the request.
+        if key == http::header::HOST {
+            continue;
+        }
+        request = request.header(key, value);
+    }
+    request
+}
+
 fn should_preserve_exact_header_case(
     adapter_name: &str,
     provider: &Provider,
@@ -4508,6 +4521,73 @@ mod tests {
     use axum::http::header::{HeaderValue, ACCEPT};
     use axum::http::HeaderMap;
     use bytes::Bytes;
+
+    #[tokio::test]
+    async fn pooled_forwarding_uses_http2_authority_without_a_second_host() {
+        use http_body_util::Full;
+        use hyper::service::service_fn;
+        use hyper_util::rt::{TokioExecutor, TokioIo};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let server_seen = seen.clone();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let service = service_fn(move |request: hyper::Request<hyper::body::Incoming>| {
+                let seen = server_seen.clone();
+                async move {
+                    let duplicate_host = request.headers().contains_key(http::header::HOST);
+                    *seen.lock().unwrap() = Some((
+                        request.version(),
+                        request.uri().authority().map(|a| a.to_string()),
+                        request.headers().get(http::header::AUTHORIZATION).cloned(),
+                    ));
+                    Ok::<_, std::convert::Infallible>(
+                        hyper::Response::builder()
+                            .status(if duplicate_host { 400 } else { 200 })
+                            .body(Full::new(Bytes::from_static(b"response")))
+                            .unwrap(),
+                    )
+                }
+            });
+            hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+                .serve_connection(TokioIo::new(socket), service)
+                .await
+                .unwrap();
+        });
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .http2_prior_knowledge()
+            .build()
+            .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(http::header::HOST, address.to_string().parse().unwrap());
+        headers.insert(
+            http::header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer fixture-token"),
+        );
+        let response = apply_reqwest_forward_headers(
+            client.post(format!("http://{address}/v1/responses")),
+            &headers,
+        )
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+        assert_eq!(response.status(), http::StatusCode::OK);
+        let (version, authority, auth) = seen.lock().unwrap().clone().unwrap();
+        assert_eq!(version, http::Version::HTTP_2);
+        assert_eq!(authority.as_deref(), Some(address.to_string().as_str()));
+        assert_eq!(auth.as_ref().unwrap(), "Bearer fixture-token");
+        assert!(
+            headers.contains_key(http::header::HOST),
+            "raw HTTP/1 headers remain available"
+        );
+        server.abort();
+    }
     use http::StatusCode;
     use serde_json::json;
     use std::collections::HashMap;

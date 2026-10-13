@@ -24,6 +24,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
 use toml_edit::DocumentMut;
 
@@ -111,6 +112,197 @@ const CC_SWITCH_LEGACY_CODEX_MODEL_PROVIDER_IDS: &[&str] = &[
     "zhipu_glm_en",
 ];
 
+// This is a quiescence policy, not a cooperative lock: Codex does not take
+// CODEX_OFFICIAL_HISTORY_OP_LOCK. Check once before a whole run and again only
+// at mutation boundaries; unchanged rollouts do not spawn a process probe.
+const CODEX_WRITER_ACTIVE: &str = "codex_writer_active";
+const CODEX_WRITER_PROBE_UNKNOWN: &str = "codex_writer_probe_unknown";
+
+#[cfg(test)]
+thread_local! {
+    static WRITER_ACTIVE_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    static OPEN_WRITER_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    static BEFORE_ROLLOUT_WRITE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn with_codex_writer_probe_for_test<T>(active: bool, run: impl FnOnce() -> T) -> T {
+    struct Reset(Option<bool>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            WRITER_ACTIVE_OVERRIDE.with(|slot| slot.set(self.0));
+        }
+    }
+    let previous = WRITER_ACTIVE_OVERRIDE.with(|slot| slot.replace(Some(active)));
+    let _reset = Reset(previous);
+    run()
+}
+
+fn is_codex_writer_executable(executable: &str) -> bool {
+    let basename = executable
+        .trim()
+        .trim_matches('"')
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("");
+    matches!(
+        basename.to_ascii_lowercase().as_str(),
+        "codex" | "codex.exe" | "codex-app-server" | "codex-app-server.exe"
+    )
+}
+
+fn codex_writer_deferral_reason() -> Option<&'static str> {
+    #[cfg(test)]
+    {
+        if let Some(active) = WRITER_ACTIVE_OVERRIDE.with(|slot| slot.get()) {
+            return active.then_some(CODEX_WRITER_ACTIVE);
+        }
+        // The real Codex running this suite must not block temporary fixtures.
+        // No production bypass: this branch exists only in the unit-test build.
+        if std::env::var_os("CC_SWITCH_TEST_HOME").is_some() {
+            return None;
+        }
+    }
+    #[cfg(unix)]
+    let output = Command::new("ps")
+        .args(["-ww", "-Ao", "comm="])
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .output();
+    #[cfg(windows)]
+    let output = {
+        use std::os::windows::process::CommandExt;
+        Command::new("tasklist")
+            .args(["/FO", "CSV", "/NH"])
+            .creation_flags(0x08000000)
+            .stdin(Stdio::null())
+            .output()
+    };
+    #[cfg(not(any(unix, windows)))]
+    return Some(CODEX_WRITER_PROBE_UNKNOWN);
+    #[cfg(any(unix, windows))]
+    {
+        let Ok(output) = output else {
+            return Some(CODEX_WRITER_PROBE_UNKNOWN);
+        };
+        if !output.status.success() || !output.stderr.is_empty() {
+            return Some(CODEX_WRITER_PROBE_UNKNOWN);
+        }
+        let Ok(table) = std::str::from_utf8(&output.stdout) else {
+            return Some(CODEX_WRITER_PROBE_UNKNOWN);
+        };
+        if table.trim().is_empty() {
+            return Some(CODEX_WRITER_PROBE_UNKNOWN);
+        }
+        let active = table.lines().any(|line| {
+            #[cfg(windows)]
+            let line = line.split(',').next().unwrap_or("");
+            is_codex_writer_executable(line)
+        });
+        active.then_some(CODEX_WRITER_ACTIVE)
+    }
+}
+
+fn ensure_codex_writer_quiescent() -> Result<(), AppError> {
+    if let Some(reason) = codex_writer_deferral_reason() {
+        return Err(AppError::Conflict(format!(
+            "Codex history deferred: {reason}; stop Codex and retry on the next switch/startup"
+        )));
+    }
+    Ok(())
+}
+
+/// Unix requires lsof for the extra open-descriptor check. Missing or unknown
+/// results fail closed; process-name detection alone cannot exclude other writers.
+#[cfg(unix)]
+fn probe_open_rollout_writer(path: &Path) -> Result<bool, AppError> {
+    #[cfg(target_os = "macos")]
+    let executable = "/usr/sbin/lsof";
+    #[cfg(not(target_os = "macos"))]
+    let executable = "lsof";
+    let output = Command::new(executable)
+        .args(["-nP", "-Ffa", "--"])
+        .arg(path)
+        .stdin(Stdio::null())
+        .output();
+    let output = match output {
+        Ok(output) => output,
+        Err(error) => {
+            return Err(AppError::Conflict(format!(
+                "Codex history open-writer probe failed: {error}"
+            )))
+        }
+    };
+    if !matches!(output.status.code(), Some(0 | 1)) || !output.stderr.is_empty() {
+        return Err(AppError::Conflict(
+            "Codex history deferred: open-writer probe unknown".to_string(),
+        ));
+    }
+    let table = std::str::from_utf8(&output.stdout).map_err(|_| {
+        AppError::Conflict("Codex history deferred: unreadable open-writer probe".to_string())
+    })?;
+    if (output.status.success() || !table.trim().is_empty())
+        && !table.lines().any(|line| matches!(line, "ar" | "aw" | "au"))
+    {
+        return Err(AppError::Conflict(
+            "Codex history deferred: open-writer access mode unknown".to_string(),
+        ));
+    }
+    // -F a reports r/w/u (read/write/read-write). A writable descriptor can
+    // keep appending to the old inode even after an atomic rename.
+    Ok(table.lines().any(|line| matches!(line, "aw" | "au")))
+}
+
+fn ensure_rollout_write_quiescent(path: &Path) -> Result<Option<fs::File>, AppError> {
+    ensure_codex_writer_quiescent()?;
+    #[cfg(test)]
+    if let Some(active) = OPEN_WRITER_OVERRIDE.with(|slot| slot.get()) {
+        return if active {
+            Err(AppError::Conflict(
+                "Codex history deferred: open rollout writer (fixture)".to_string(),
+            ))
+        } else {
+            Ok(None)
+        };
+    }
+    #[cfg(test)]
+    if std::env::var_os("CC_SWITCH_TEST_HOME").is_some() {
+        // Unit fixtures explicitly override this seam for held-FD regressions.
+        return Ok(None);
+    }
+    #[cfg(unix)]
+    {
+        if probe_open_rollout_writer(path)? {
+            return Err(AppError::Conflict(format!(
+                "Codex history deferred: open rollout writer at {}; stop the writer and retry",
+                path.display()
+            )));
+        }
+        Ok(None)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_DELETE, FILE_SHARE_READ};
+        // Deny concurrent write access but allow our atomic replacement. Keep
+        // this handle alive through write_rollout; existing writers deny the open.
+        fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
+            .open(path)
+            .map(Some)
+            .map_err(|error| {
+                AppError::Conflict(format!(
+                    "Codex history deferred: cannot reserve rollout against writers: {error}"
+                ))
+            })
+    }
+    #[cfg(not(any(unix, windows)))]
+    Err(AppError::Conflict(
+        "Codex history deferred: unsupported writer probe".to_string(),
+    ))
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct CodexHistoryProviderBucketMigrationOutcome {
     pub source_provider_ids: Vec<String>,
@@ -131,6 +323,14 @@ pub fn maybe_migrate_codex_third_party_history_provider_bucket(
     if crate::settings::is_codex_third_party_history_provider_bucket_migrated() {
         return Ok(CodexHistoryProviderBucketMigrationOutcome {
             skipped_reason: Some("already_migrated".to_string()),
+            ..Default::default()
+        });
+    }
+
+    let _op_guard = lock_codex_official_history_op();
+    if let Some(reason) = codex_writer_deferral_reason() {
+        return Ok(CodexHistoryProviderBucketMigrationOutcome {
+            skipped_reason: Some(reason.to_string()),
             ..Default::default()
         });
     }
@@ -223,6 +423,12 @@ pub fn maybe_migrate_codex_official_history_to_unified_bucket(
         });
     }
     let _op_guard = lock_codex_official_history_op();
+    if let Some(reason) = codex_writer_deferral_reason() {
+        return Ok(CodexHistoryProviderBucketMigrationOutcome {
+            skipped_reason: Some(reason.to_string()),
+            ..Default::default()
+        });
+    }
     let codex_dir = get_codex_config_dir();
     // marker 绑定迁移时的 Codex 目录：切换 codex_config_dir 后旧 marker 不再
     // 挡住新目录的迁移（迁移幂等，重跑无害）。
@@ -240,8 +446,34 @@ pub fn maybe_migrate_codex_official_history_to_unified_bucket(
         });
     }
 
+    // Settings-triggered retries must use the same legacy -> openai -> custom
+    // sequence as startup, so the restore ledger records official IDs as openai.
+    // WSL/network SQLite paths are unsupported; this is a path eligibility
+    // preflight, not an ordinary SQLite write reservation.
+    let config_text = read_codex_config_text().unwrap_or_default();
+    if codex_state_db_paths(&codex_dir, &config_text)
+        .iter()
+        .any(|path| path.exists() && !codex_state_db_is_lockable(path))
+    {
+        return Ok(CodexHistoryProviderBucketMigrationOutcome {
+            skipped_reason: Some("state_db_unlockable".to_string()),
+            ..Default::default()
+        });
+    }
+    let legacy = migrate_codex_legacy_official_history_to_openai_bucket_inner()?;
+    if legacy
+        .skipped_reason
+        .as_deref()
+        .is_some_and(|reason| reason != "already_migrated")
+    {
+        return Ok(legacy);
+    }
+
     let source_provider_ids = unified_history_compat_source_provider_ids();
     let backup_root = migration_backup_root(OFFICIAL_UNIFY_MIGRATION_NAME);
+    // Tag the ledger before touching history, including partially completed runs.
+    fs::create_dir_all(&backup_root).map_err(|e| AppError::io(&backup_root, e))?;
+    write_backup_generation_meta(&backup_root, &codex_dir_key)?;
     let migrated_jsonl_files =
         migrate_codex_jsonl_files(&codex_dir, &source_provider_ids, &backup_root)?;
     let migrated_state_rows =
@@ -300,6 +532,7 @@ fn unified_history_compat_source_provider_ids() -> BTreeSet<String> {
         LEGACY_CODEX_SWITCH_PROXY_PROVIDER_ID,
     ]
     .into_iter()
+    .chain(CC_SWITCH_LEGACY_CODEX_MODEL_PROVIDER_IDS.iter().copied())
     .map(str::to_string)
     .collect()
 }
@@ -329,6 +562,17 @@ fn codex_config_text_routes_custom(config_text: &str) -> bool {
 pub fn maybe_migrate_codex_legacy_official_history_to_openai_bucket(
 ) -> Result<CodexHistoryProviderBucketMigrationOutcome, AppError> {
     let _op_guard = lock_codex_official_history_op();
+    migrate_codex_legacy_official_history_to_openai_bucket_inner()
+}
+
+fn migrate_codex_legacy_official_history_to_openai_bucket_inner(
+) -> Result<CodexHistoryProviderBucketMigrationOutcome, AppError> {
+    if let Some(reason) = codex_writer_deferral_reason() {
+        return Ok(CodexHistoryProviderBucketMigrationOutcome {
+            skipped_reason: Some(reason.to_string()),
+            ..Default::default()
+        });
+    }
     let codex_dir = get_codex_config_dir();
     let codex_dir_key = canonical_dir_string(&codex_dir);
     if crate::settings::is_codex_legacy_official_history_bucket_migrated_for_dir(&codex_dir_key) {
@@ -503,6 +747,12 @@ fn restore_codex_official_history_inner(
     restore_backup_root: &Path,
     config_text: &str,
 ) -> Result<CodexOfficialHistoryRestoreOutcome, AppError> {
+    if let Some(reason) = codex_writer_deferral_reason() {
+        return Ok(CodexOfficialHistoryRestoreOutcome {
+            skipped_reason: Some(reason.to_string()),
+            ..Default::default()
+        });
+    }
     let codex_dir_key = canonical_dir_string(codex_dir);
     let (official_session_ids, official_thread_ids) =
         collect_official_ledger(ledger_parent, &codex_dir_key)?;
@@ -762,6 +1012,7 @@ fn restore_codex_state_db_official_threads(
 
     backup_codex_state_db(db_path, codex_dir, backup_root, &conn)?;
 
+    ensure_codex_writer_quiescent()?;
     let tx = conn
         .transaction()
         .map_err(|e| AppError::Database(format!("开启 Codex state DB 还原事务失败: {e}")))?;
@@ -878,7 +1129,11 @@ fn migration_backup_root(migration_name: &str) -> PathBuf {
     get_app_config_dir()
         .join("backups")
         .join(migration_name)
-        .join(Local::now().format("%Y%m%d_%H%M%S").to_string())
+        .join(format!(
+            "{}_{}",
+            Local::now().format("%Y%m%d_%H%M%S"),
+            uuid::Uuid::new_v4()
+        ))
 }
 
 fn is_known_cc_switch_legacy_codex_model_provider_id(provider_id: &str) -> bool {
@@ -1198,6 +1453,17 @@ fn rewrite_codex_session_file_lines(
     ensure_codex_session_file_unchanged(path, modified_before, len_before)?;
     backup_codex_jsonl_file(path, codex_dir, backup_root)?;
     ensure_codex_session_file_unchanged(path, modified_before, len_before)?;
+    #[cfg(test)]
+    BEFORE_ROLLOUT_WRITE.with(|slot| {
+        let hook = slot.borrow_mut().take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    });
+    let _write_guard = ensure_rollout_write_quiescent(path)?;
+    // A brief writer can append and close while lsof runs. This final stat is
+    // supplementary to the process/descriptor policy, not a cooperative lock.
+    ensure_codex_session_file_unchanged(path, modified_before, len_before)?;
     codex_rollout_file::write_rollout(path, rewritten.as_bytes())?;
     Ok(true)
 }
@@ -1339,6 +1605,7 @@ fn migrate_codex_state_db_provider_bucket_to(
     let mut values = Vec::with_capacity(source_provider_ids.len() + 1);
     values.push(target_provider_id.to_string());
     values.extend(source_provider_ids.iter().cloned());
+    ensure_codex_writer_quiescent()?;
     let tx = conn
         .transaction()
         .map_err(|e| AppError::Database(format!("开启 Codex state DB 迁移事务失败: {e}")))?;
@@ -3067,6 +3334,644 @@ model_provider = "aihubmix"
                 &canonical_dir_string(&codex_dir)
             )
         );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn company_switch_round_trip_keeps_migrated_sessions_and_oauth() {
+        use crate::app_config::AppType;
+        use crate::services::provider::ProviderService;
+        let home = IsolatedHome::new();
+        crate::settings::ensure_codex_unified_session_history_default_enabled().unwrap();
+        crate::settings::ensure_codex_preserve_official_auth_default_enabled().unwrap();
+        assert!(crate::settings::unify_codex_session_history());
+        assert!(crate::settings::preserve_codex_official_auth_on_switch());
+        let codex_dir = home.codex_dir();
+        fs::create_dir_all(codex_dir.join("sessions")).unwrap();
+        fs::create_dir_all(codex_dir.join("archived_sessions")).unwrap();
+        let auth = serde_json::json!({
+            "auth_mode": "chatgpt", "OPENAI_API_KEY": null,
+            "tokens": { "id_token": "fixture-id", "access_token": "fixture-access",
+                "refresh_token": "fixture-refresh", "account_id": "fixture-account" }
+        });
+        fs::write(codex_dir.join("auth.json"), auth.to_string()).unwrap();
+        fs::write(codex_dir.join("config.toml"), "model = \"gpt-5.5\"\n").unwrap();
+        let originals = [
+            ("legacy", "cc-switch-official"),
+            ("official", "openai"),
+            ("company", "hellotalk"),
+            ("old", "ccswitch"),
+            ("third", "deepseek"),
+            ("private", "my-private-relay"),
+        ];
+        let body = "{\"type\":\"response_item\",\"payload\":{\"text\":\"keep every message\"}}\n";
+        let mut files = Vec::new();
+        for (index, (id, bucket)) in originals.iter().enumerate() {
+            let compressed = index % 2 != 0;
+            let path = codex_dir
+                .join(if compressed {
+                    "archived_sessions"
+                } else {
+                    "sessions"
+                })
+                .join(format!(
+                    "{id}.jsonl{}",
+                    if compressed { ".zst" } else { "" }
+                ));
+            let text = session_meta_line(id, bucket) + body;
+            let bytes = if compressed {
+                zstd::stream::encode_all(text.as_bytes(), 3).unwrap()
+            } else {
+                text.into_bytes()
+            };
+            fs::write(&path, bytes).unwrap();
+            files.push(path);
+        }
+        let state_db = codex_dir.join(CODEX_STATE_DB_FILENAME);
+        seed_threads(&state_db, &originals);
+        let db = std::sync::Arc::new(Database::memory().unwrap());
+        let mut official = Provider::with_id(
+            crate::database::CODEX_OFFICIAL_PROVIDER_ID.to_string(),
+            "Official fixture".to_string(),
+            serde_json::json!({"auth": {}, "config": "model = \"gpt-5.5\"\n"}),
+            None,
+        );
+        official.category = Some("official".to_string());
+        let company = Provider::with_id(
+            "company-fixture".to_string(),
+            "Company fixture".to_string(),
+            serde_json::json!({ "auth": { "OPENAI_API_KEY": "fixture-company-token" },
+                "config": "model_provider = \"custom\"\nmodel = \"gpt-5.5\"\n[model_providers.custom]\nname = \"Company\"\nbase_url = \"https://fixture.invalid/v1\"\nwire_api = \"responses\"\n",
+                "modelCatalog": { "models": [{ "model": "gpt-5.5", "capabilities": {
+                    "supported_reasoning_levels": [
+                        {"effort": "max", "description": "Pool max"},
+                        {"effort": "ultra", "description": "Pool ultra"}
+                    ],
+                    "default_reasoning_level": "ultra", "context_window": 1_000_000,
+                    "additional_speed_tiers": ["fast"], "service_tiers": [
+                        {"id": "priority", "name": "Fast", "description": "Company pool"}
+                    ]
+                }}] }
+            }),
+            None,
+        );
+        for row in [&official, &company] {
+            db.save_provider("codex", row).unwrap();
+        }
+        db.set_current_provider("codex", &official.id).unwrap();
+        crate::settings::set_current_provider(&AppType::Codex, Some(&official.id)).unwrap();
+        let state = crate::store::AppState::new(db);
+        assert_eq!(
+            maybe_migrate_codex_official_history_to_unified_bucket()
+                .unwrap()
+                .skipped_reason
+                .as_deref(),
+            Some("live_not_unified")
+        );
+        let deferred = with_codex_writer_probe_for_test(true, || {
+            crate::commands::switch_provider_test_hook(&state, AppType::Codex, &company.id).unwrap()
+        });
+        assert!(deferred
+            .warnings
+            .iter()
+            .any(|warning| warning.contains(CODEX_WRITER_ACTIVE) && warning.contains("下次切换")));
+        assert_eq!(thread_provider(&state_db, "legacy"), "cc-switch-official");
+        assert_eq!(thread_provider(&state_db, "official"), "openai");
+        assert!(
+            !crate::settings::is_codex_official_history_unify_migrated_for_dir(
+                &canonical_dir_string(&codex_dir)
+            )
+        );
+        assert!(crate::settings::unify_codex_migrate_existing_requested());
+        // Same public entry point as production, after the writer has stopped:
+        // no manual migration or application restart is needed.
+        let retried = with_codex_writer_probe_for_test(false, || {
+            crate::commands::switch_provider_test_hook(&state, AppType::Codex, &company.id).unwrap()
+        });
+        assert!(retried.warnings.is_empty(), "{:?}", retried.warnings);
+        assert!(
+            crate::settings::is_codex_legacy_official_history_bucket_migrated_for_dir(
+                &canonical_dir_string(&codex_dir)
+            )
+        );
+        assert!(
+            crate::settings::is_codex_official_history_unify_migrated_for_dir(
+                &canonical_dir_string(&codex_dir)
+            )
+        );
+        let completed = with_codex_writer_probe_for_test(true, || {
+            crate::commands::switch_provider_test_hook(&state, AppType::Codex, &official.id)
+                .unwrap()
+        });
+        assert!(completed
+            .warnings
+            .iter()
+            .all(|warning| !warning.contains("既有历史尚未全部统一")));
+        assert!(completed
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("检查已延期")));
+        assert!(
+            crate::settings::is_codex_official_history_unify_migrated_for_dir(
+                &canonical_dir_string(&codex_dir)
+            )
+        );
+        let migrated: Vec<_> = files.iter().map(|path| fs::read(path).unwrap()).collect();
+        for provider_id in [&official.id, &company.id, &official.id, &company.id] {
+            let switched =
+                crate::commands::switch_provider_test_hook(&state, AppType::Codex, provider_id)
+                    .unwrap();
+            assert!(switched.warnings.is_empty(), "{:?}", switched.warnings);
+            let config = read_codex_config_text().unwrap();
+            assert!(codex_config_text_routes_custom(&config), "{config}");
+            assert_eq!(
+                crate::config::read_json_file::<Value>(&codex_dir.join("auth.json")).unwrap(),
+                auth
+            );
+            for ((id, bucket), path) in originals.iter().zip(&files) {
+                let text = codex_rollout_file::read_to_string(path).unwrap();
+                let meta: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+                let expected = if *bucket == "my-private-relay" {
+                    *bucket
+                } else {
+                    "custom"
+                };
+                assert_eq!(meta["payload"]["id"], *id);
+                assert_eq!(meta["payload"]["model_provider"], expected);
+                assert_eq!(thread_provider(&state_db, id), expected);
+                assert!(text.ends_with(body));
+            }
+            assert_eq!(
+                maybe_migrate_codex_official_history_to_unified_bucket()
+                    .unwrap()
+                    .skipped_reason
+                    .as_deref(),
+                Some("already_migrated")
+            );
+            for (path, bytes) in files.iter().zip(&migrated) {
+                assert_eq!(fs::read(path).unwrap(), *bytes);
+            }
+        }
+        let stored = state
+            .db
+            .get_provider_by_id(&company.id, "codex")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.settings_config["auth"]["OPENAI_API_KEY"],
+            "fixture-company-token"
+        );
+        let catalog: Value = crate::config::read_json_file(
+            &codex_dir.join(crate::codex_config::CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME),
+        )
+        .unwrap();
+        assert_eq!(
+            catalog["models"][0]["additional_speed_tiers"],
+            serde_json::json!(["fast"])
+        );
+        assert_eq!(catalog["models"][0]["service_tiers"][0]["id"], "priority");
+        assert_eq!(
+            catalog["models"][0]["supported_reasoning_levels"],
+            company.settings_config["modelCatalog"]["models"][0]["capabilities"]
+                ["supported_reasoning_levels"]
+        );
+        assert_eq!(catalog["models"][0]["default_reasoning_level"], "ultra");
+        assert_eq!(catalog["models"][0]["context_window"], 1_000_000);
+        // Same model list, new pool limits: saving the refreshed provider must
+        // automatically regenerate live config/catalog and preserve both logins.
+        let mut updated = stored;
+        updated.settings_config["modelCatalog"]["models"][0]["capabilities"]["context_window"] =
+            serde_json::json!(640_000);
+        updated.settings_config["modelCatalog"]["models"][0]["capabilities"]
+            ["default_reasoning_level"] = serde_json::json!("max");
+        ProviderService::update(&state, AppType::Codex, None, updated).unwrap();
+        let refreshed: Value = crate::config::read_json_file(
+            &codex_dir.join(crate::codex_config::CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME),
+        )
+        .unwrap();
+        assert_eq!(refreshed["models"][0]["context_window"], 640_000);
+        assert_eq!(refreshed["models"][0]["default_reasoning_level"], "max");
+        assert_eq!(
+            refreshed["models"][0]["additional_speed_tiers"],
+            serde_json::json!(["fast"])
+        );
+        assert_eq!(
+            crate::config::read_json_file::<Value>(&codex_dir.join("auth.json")).unwrap(),
+            auth
+        );
+        assert_eq!(
+            state
+                .db
+                .get_provider_by_id(&company.id, "codex")
+                .unwrap()
+                .unwrap()
+                .settings_config["auth"]["OPENAI_API_KEY"],
+            "fixture-company-token"
+        );
+    }
+
+    #[test]
+    fn migration_backup_generations_never_share_a_directory() {
+        assert_ne!(
+            migration_backup_root(OFFICIAL_UNIFY_MIGRATION_NAME),
+            migration_backup_root(OFFICIAL_UNIFY_MIGRATION_NAME)
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn company_unify_runs_legacy_first_and_restores_only_official_history() {
+        let home = IsolatedHome::new();
+        let codex_dir = home.codex_dir();
+        fs::create_dir_all(codex_dir.join("sessions")).unwrap();
+        fs::write(
+            codex_dir.join("config.toml"),
+            "model_provider = \"custom\"\n",
+        )
+        .unwrap();
+        crate::settings::ensure_codex_unified_session_history_default_enabled().unwrap();
+        let plain = codex_dir.join("sessions/legacy.jsonl");
+        let compressed = codex_dir.join("sessions/official.jsonl.zst");
+        fs::write(&plain, session_meta_line("legacy", "cc-switch-official")).unwrap();
+        fs::write(
+            &compressed,
+            zstd::stream::encode_all(session_meta_line("official", "openai").as_bytes(), 3)
+                .unwrap(),
+        )
+        .unwrap();
+        let state_db = codex_dir.join(CODEX_STATE_DB_FILENAME);
+        seed_threads(
+            &state_db,
+            &[
+                ("legacy", "cc-switch-official"),
+                ("official", "openai"),
+                ("company", "hellotalk"),
+                ("old", "ccswitch"),
+                ("third", "deepseek"),
+                ("private", "my-private-relay"),
+            ],
+        );
+        // The settings-triggered entry point must enforce the same ordering as startup.
+        let outcome = maybe_migrate_codex_official_history_to_unified_bucket().unwrap();
+        assert_eq!(outcome.skipped_reason, None);
+        assert_eq!(thread_provider(&state_db, "legacy"), "custom");
+        assert!(codex_rollout_file::read_to_string(&plain)
+            .unwrap()
+            .contains("\"model_provider\":\"custom\""));
+        assert!(codex_rollout_file::read_to_string(&compressed)
+            .unwrap()
+            .contains("\"model_provider\":\"custom\""));
+        assert_eq!(thread_provider(&state_db, "company"), "custom");
+        assert_eq!(thread_provider(&state_db, "old"), "custom");
+        assert_eq!(thread_provider(&state_db, "third"), "custom");
+        assert_eq!(thread_provider(&state_db, "private"), "my-private-relay");
+        assert_eq!(
+            maybe_migrate_codex_official_history_to_unified_bucket()
+                .unwrap()
+                .skipped_reason
+                .as_deref(),
+            Some("already_migrated")
+        );
+        let mut settings = crate::settings::get_settings();
+        settings.unify_codex_session_history = false;
+        crate::settings::update_settings(settings).unwrap();
+        let restored = restore_codex_official_history_from_backups().unwrap();
+        assert_eq!(restored.restored_jsonl_files, 2);
+        assert_eq!(restored.restored_state_rows, 2);
+        for id in ["legacy", "official"] {
+            assert_eq!(thread_provider(&state_db, id), "openai");
+        }
+        for id in ["company", "old", "third"] {
+            assert_eq!(thread_provider(&state_db, id), "custom");
+        }
+        assert!(codex_rollout_file::read_to_string(&plain)
+            .unwrap()
+            .contains("\"model_provider\":\"openai\""));
+        let raw = fs::read(&compressed).unwrap();
+        assert_eq!(&raw[..4], &[0x28, 0xB5, 0x2F, 0xFD]);
+        assert!(codex_rollout_file::read_to_string(&compressed)
+            .unwrap()
+            .contains("\"model_provider\":\"openai\""));
+        assert_eq!(
+            restore_codex_official_history_from_backups()
+                .unwrap()
+                .skipped_reason
+                .as_deref(),
+            Some("nothing_to_restore")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn company_unify_failure_keeps_recoverable_ledger_and_retries() {
+        let home = IsolatedHome::new();
+        let dir = home.codex_dir();
+        fs::create_dir_all(dir.join("sessions")).unwrap();
+        fs::write(dir.join("config.toml"), "model_provider = \"custom\"\n").unwrap();
+        crate::settings::ensure_codex_unified_session_history_default_enabled().unwrap();
+        let session = dir.join("sessions/official.jsonl");
+        fs::write(&session, session_meta_line("s1", "openai")).unwrap();
+        let state_db = dir.join(CODEX_STATE_DB_FILENAME);
+        seed_threads(&state_db, &[("s1", "openai")]);
+        Connection::open(&state_db).unwrap().execute_batch(
+            "CREATE TRIGGER reject_unify BEFORE UPDATE ON threads WHEN NEW.model_provider = 'custom'
+             BEGIN SELECT RAISE(ABORT, 'fixture failure'); END;").unwrap();
+        assert!(maybe_migrate_codex_official_history_to_unified_bucket().is_err());
+        assert!(
+            !crate::settings::is_codex_official_history_unify_migrated_for_dir(
+                &canonical_dir_string(&dir)
+            )
+        );
+        assert!(has_codex_official_history_unify_backup());
+        assert!(fs::read_to_string(&session)
+            .unwrap()
+            .contains("\"model_provider\":\"custom\""));
+        assert_eq!(thread_provider(&state_db, "s1"), "openai");
+        let mut settings = crate::settings::get_settings();
+        settings.unify_codex_session_history = false;
+        crate::settings::update_settings(settings).unwrap();
+        assert_eq!(
+            restore_codex_official_history_from_backups()
+                .unwrap()
+                .restored_jsonl_files,
+            1
+        );
+        assert_eq!(
+            fs::read_to_string(&session).unwrap(),
+            session_meta_line("s1", "openai")
+        );
+        Connection::open(&state_db)
+            .unwrap()
+            .execute_batch("DROP TRIGGER reject_unify;")
+            .unwrap();
+        let mut settings = crate::settings::get_settings();
+        settings.unify_codex_session_history = true;
+        settings.unify_codex_migrate_existing = Some(true);
+        crate::settings::update_settings(settings).unwrap();
+        maybe_migrate_codex_official_history_to_unified_bucket().unwrap();
+        assert_eq!(thread_provider(&state_db, "s1"), "custom");
+        assert!(
+            crate::settings::is_codex_official_history_unify_migrated_for_dir(
+                &canonical_dir_string(&dir)
+            )
+        );
+        assert_eq!(
+            maybe_migrate_codex_official_history_to_unified_bucket()
+                .unwrap()
+                .skipped_reason
+                .as_deref(),
+            Some("already_migrated")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn company_unify_markers_and_restore_are_scoped_to_codex_directory() {
+        let home = IsolatedHome::new();
+        crate::settings::ensure_codex_unified_session_history_default_enabled().unwrap();
+        let first = home.codex_dir();
+        let second = home.dir.path().join("other-codex");
+        for (index, dir) in [&first, &second].into_iter().enumerate() {
+            fs::create_dir_all(dir.join("sessions")).unwrap();
+            fs::write(dir.join("config.toml"), "model_provider = \"custom\"\n").unwrap();
+            // Same ID in two profiles must never make the other directory's
+            // backup ledger restore a third-party conversation.
+            let bucket = if index == 0 {
+                "cc-switch-official"
+            } else {
+                "custom"
+            };
+            fs::write(
+                dir.join("sessions/shared.jsonl"),
+                session_meta_line("shared", bucket),
+            )
+            .unwrap();
+            seed_threads(&dir.join(CODEX_STATE_DB_FILENAME), &[("shared", bucket)]);
+        }
+        maybe_migrate_codex_official_history_to_unified_bucket().unwrap();
+        let mut settings = crate::settings::get_settings();
+        settings.codex_config_dir = Some(second.to_string_lossy().to_string());
+        crate::settings::update_settings(settings).unwrap();
+        assert!(!has_codex_official_history_unify_backup());
+        assert!(
+            !crate::settings::is_codex_legacy_official_history_bucket_migrated_for_dir(
+                &canonical_dir_string(&second)
+            )
+        );
+        assert!(
+            !crate::settings::is_codex_official_history_unify_migrated_for_dir(
+                &canonical_dir_string(&second)
+            )
+        );
+        assert_eq!(
+            maybe_migrate_codex_official_history_to_unified_bucket()
+                .unwrap()
+                .skipped_reason,
+            None
+        );
+        assert!(
+            crate::settings::is_codex_official_history_unify_migrated_for_dir(
+                &canonical_dir_string(&second)
+            )
+        );
+        let mut settings = crate::settings::get_settings();
+        settings.unify_codex_session_history = false;
+        crate::settings::update_settings(settings).unwrap();
+        let restore = restore_codex_official_history_from_backups().unwrap();
+        assert_eq!(restore.restored_state_rows, 0);
+        assert_eq!(restore.restored_jsonl_files, 0);
+        assert_eq!(
+            thread_provider(&second.join(CODEX_STATE_DB_FILENAME), "shared"),
+            "custom"
+        );
+        assert_eq!(
+            thread_provider(&first.join(CODEX_STATE_DB_FILENAME), "shared"),
+            "custom"
+        );
+    }
+
+    #[test]
+    fn writer_probe_matches_executable_basename_only() {
+        for executable in [
+            "codex",
+            "codex.exe",
+            "/Applications/Codex.app/Contents/MacOS/Codex",
+            r"C:\tools\codex.exe",
+            "/usr/bin/codex-app-server",
+        ] {
+            assert!(is_codex_writer_executable(executable), "{executable}");
+        }
+        for executable in [
+            "cc-switch",
+            "codex_switch_tests",
+            "not-codex",
+            "sh -c echo codex",
+            "/tmp/codex/config.toml",
+        ] {
+            assert!(!is_codex_writer_executable(executable), "{executable}");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn active_writer_defers_legacy_third_party_and_restore_without_markers() {
+        let home = IsolatedHome::new();
+        crate::settings::ensure_codex_unified_session_history_default_enabled().unwrap();
+        let dir = home.codex_dir();
+        fs::create_dir_all(dir.join("sessions")).unwrap();
+        fs::write(dir.join("config.toml"), "model_provider = \"custom\"\n").unwrap();
+        let session = dir.join("sessions/legacy.jsonl");
+        let original = session_meta_line("s1", "cc-switch-official");
+        fs::write(&session, &original).unwrap();
+        let state_db = dir.join(CODEX_STATE_DB_FILENAME);
+        seed_threads(&state_db, &[("s1", "cc-switch-official")]);
+        let before =
+            serde_json::to_value(crate::settings::get_settings().local_migrations).unwrap();
+        with_codex_writer_probe_for_test(true, || {
+            let db = Database::memory().unwrap();
+            for result in [
+                maybe_migrate_codex_legacy_official_history_to_openai_bucket().unwrap(),
+                maybe_migrate_codex_third_party_history_provider_bucket(&db).unwrap(),
+                maybe_migrate_codex_official_history_to_unified_bucket().unwrap(),
+            ] {
+                assert_eq!(result.skipped_reason.as_deref(), Some(CODEX_WRITER_ACTIVE));
+            }
+            let restore = restore_codex_official_history_inner(
+                &dir,
+                &official_history_unify_backup_parent(),
+                &home.dir.path().join("restore"),
+                "",
+            )
+            .unwrap();
+            assert_eq!(restore.skipped_reason.as_deref(), Some(CODEX_WRITER_ACTIVE));
+        });
+        assert_eq!(fs::read_to_string(&session).unwrap(), original);
+        assert_eq!(thread_provider(&state_db, "s1"), "cc-switch-official");
+        assert_eq!(
+            serde_json::to_value(crate::settings::get_settings().local_migrations).unwrap(),
+            before
+        );
+        assert!(crate::settings::unify_codex_migrate_existing_requested());
+        assert!(!get_app_config_dir().join("backups").exists());
+    }
+
+    #[test]
+    #[serial]
+    fn held_writer_append_after_last_stat_cannot_replace_rollout_or_mark_complete() {
+        use std::io::Write;
+        let home = IsolatedHome::new();
+        crate::settings::ensure_codex_unified_session_history_default_enabled().unwrap();
+        let dir = home.codex_dir();
+        fs::create_dir_all(dir.join("sessions")).unwrap();
+        fs::write(dir.join("config.toml"), "model_provider = \"custom\"\n").unwrap();
+        let path = dir.join("sessions/official.jsonl");
+        let original = session_meta_line("s1", "openai");
+        fs::write(&path, &original).unwrap();
+        seed_threads(&dir.join(CODEX_STATE_DB_FILENAME), &[("s1", "openai")]);
+        let held = std::sync::Arc::new(std::sync::Mutex::new(None::<fs::File>));
+        let holder = held.clone();
+        let writer_path = path.clone();
+        BEFORE_ROLLOUT_WRITE.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                let mut writer = fs::OpenOptions::new()
+                    .append(true)
+                    .open(&writer_path)
+                    .unwrap();
+                writer.write_all(b"late held-writer event\n").unwrap();
+                #[cfg(unix)]
+                assert!(
+                    !matches!(probe_open_rollout_writer(&writer_path), Ok(false)),
+                    "active or unknown must defer"
+                );
+                *holder.lock().unwrap() = Some(writer);
+                OPEN_WRITER_OVERRIDE.with(|slot| slot.set(Some(true)));
+            }))
+        });
+        let result = with_codex_writer_probe_for_test(
+            false,
+            maybe_migrate_codex_official_history_to_unified_bucket,
+        );
+        OPEN_WRITER_OVERRIDE.with(|slot| slot.set(None));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("open rollout writer"));
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            original.clone() + "late held-writer event\n"
+        );
+        held.lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .write_all(b"still same inode\n")
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            original + "late held-writer event\nstill same inode\n"
+        );
+        assert_eq!(
+            thread_provider(&dir.join(CODEX_STATE_DB_FILENAME), "s1"),
+            "openai"
+        );
+        assert!(
+            !crate::settings::is_codex_official_history_unify_migrated_for_dir(
+                &canonical_dir_string(&dir)
+            )
+        );
+        assert!(crate::settings::unify_codex_migrate_existing_requested());
+    }
+
+    #[test]
+    #[serial]
+    fn brief_writer_append_and_close_after_last_stat_keeps_all_bytes() {
+        use std::io::Write;
+        let home = IsolatedHome::new();
+        crate::settings::ensure_codex_unified_session_history_default_enabled().unwrap();
+        let dir = home.codex_dir();
+        fs::create_dir_all(dir.join("sessions")).unwrap();
+        fs::write(dir.join("config.toml"), "model_provider = \"custom\"\n").unwrap();
+        let path = dir.join("sessions/official.jsonl");
+        let original = session_meta_line("s1", "openai");
+        fs::write(&path, &original).unwrap();
+        seed_threads(&dir.join(CODEX_STATE_DB_FILENAME), &[("s1", "openai")]);
+        let writer_path = path.clone();
+        BEFORE_ROLLOUT_WRITE.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                let mut writer = fs::OpenOptions::new()
+                    .append(true)
+                    .open(&writer_path)
+                    .unwrap();
+                writer.write_all(b"late brief-writer event\n").unwrap();
+                drop(writer);
+            }))
+        });
+        // Probe sees no writer: final stat after that probe still rejects the
+        // replaced snapshot, covering append-and-close during the probe window.
+        OPEN_WRITER_OVERRIDE.with(|slot| slot.set(Some(false)));
+        let result = with_codex_writer_probe_for_test(
+            false,
+            maybe_migrate_codex_official_history_to_unified_bucket,
+        );
+        OPEN_WRITER_OVERRIDE.with(|slot| slot.set(None));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("changed during migration"));
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            original + "late brief-writer event\n"
+        );
+        assert_eq!(
+            thread_provider(&dir.join(CODEX_STATE_DB_FILENAME), "s1"),
+            "openai"
+        );
+        assert!(
+            !crate::settings::is_codex_official_history_unify_migrated_for_dir(
+                &canonical_dir_string(&dir)
+            )
+        );
+        assert!(crate::settings::unify_codex_migrate_existing_requested());
     }
 
     #[test]

@@ -11,6 +11,7 @@ import { checkForUpdate } from "../lib/updater";
 import { settingsApi } from "@/lib/api";
 import { confirmCompanySoftwareUpdate } from "@/lib/userAttention";
 import { toast } from "sonner";
+import { COMPANY_AUTH_LOGIN_EVENT } from "@/components/auth/companyCatalogEvents";
 
 interface UpdateContextValue {
   // 更新状态
@@ -61,6 +62,7 @@ export function UpdateProvider({ children }: { children: React.ReactNode }) {
   }, [updateInfo?.availableVersion]);
 
   const isCheckingRef = useRef(false);
+  const loginCheckPendingRef = useRef(false);
 
   const openInstaller = useCallback(async (info: UpdateInfo) => {
     try {
@@ -92,7 +94,7 @@ export function UpdateProvider({ children }: { children: React.ReactNode }) {
   );
 
   const checkUpdate = useCallback(
-    async (options?: { notify?: boolean }) => {
+    async (options?: { notify?: boolean }): Promise<boolean> => {
       if (isCheckingRef.current) return false;
       isCheckingRef.current = true;
       setIsChecking(true);
@@ -135,6 +137,10 @@ export function UpdateProvider({ children }: { children: React.ReactNode }) {
       } finally {
         setIsChecking(false);
         isCheckingRef.current = false;
+        if (loginCheckPendingRef.current) {
+          loginCheckPendingRef.current = false;
+          void checkUpdate({ notify: true }).catch(console.error);
+        }
       }
     },
     [notifyUpdateAvailable],
@@ -157,12 +163,23 @@ export function UpdateProvider({ children }: { children: React.ReactNode }) {
 
   // 应用启动时自动检查更新
   useEffect(() => {
+    const handleCompanyLogin = () => {
+      loginCheckPendingRef.current = isCheckingRef.current;
+      if (!isCheckingRef.current) {
+        checkUpdate({ notify: true }).catch(console.error);
+      }
+    };
+    window.addEventListener(COMPANY_AUTH_LOGIN_EVENT, handleCompanyLogin);
     // 延迟1秒后检查，避免影响启动体验
     const timer = setTimeout(() => {
       checkUpdate({ notify: true }).catch(console.error);
     }, 1000);
 
-    return () => clearTimeout(timer);
+    return () => {
+      clearTimeout(timer);
+      loginCheckPendingRef.current = false;
+      window.removeEventListener(COMPANY_AUTH_LOGIN_EVENT, handleCompanyLogin);
+    };
   }, [checkUpdate]);
 
   const value: UpdateContextValue = {

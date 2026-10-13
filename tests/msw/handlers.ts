@@ -64,6 +64,8 @@ const isAppId = (value: unknown): value is AppId =>
     "claude",
     "claude-desktop",
     "codex",
+    "mcode",
+    "grokbuild",
     "gemini",
     "opencode",
     "openclaw",
@@ -108,6 +110,9 @@ const success = (payload: unknown): Response =>
 
 export const handlers = [
   http.get(MODELS_DEV_API_URL, () => success({})),
+  http.post(`${TAURI_ENDPOINT}/check_cc_switch_update_manifest`, () =>
+    success({ version: "0.0.0" }),
+  ),
   http.post(`${TAURI_ENDPOINT}/get_migration_result`, () => success(false)),
   http.post(`${TAURI_ENDPOINT}/get_skills_migration_result`, () =>
     success(null),

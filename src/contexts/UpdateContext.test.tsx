@@ -94,4 +94,34 @@ describe("UpdateProvider company update prompt", () => {
     expect(mocks.confirmCompanySoftwareUpdate).not.toHaveBeenCalled();
     expect(mocks.launchInstaller).not.toHaveBeenCalled();
   });
+
+  it("checks again after company login when startup found no session", async () => {
+    mocks.checkForUpdate.mockResolvedValueOnce({ status: "up-to-date" });
+    await renderAndRunStartupCheck();
+    await act(async () => {
+      window.dispatchEvent(new Event("company-auth-login"));
+      await Promise.resolve();
+    });
+    expect(mocks.checkForUpdate).toHaveBeenCalledTimes(2);
+    expect(mocks.confirmCompanySoftwareUpdate).toHaveBeenCalledOnce();
+  });
+
+  it("queues a login update check behind an in-flight startup check", async () => {
+    let resolve!: (value: unknown) => void;
+    mocks.checkForUpdate.mockReturnValueOnce(
+      new Promise((done) => {
+        resolve = done;
+      }),
+    );
+    await renderAndRunStartupCheck();
+    act(() => {
+      window.dispatchEvent(new Event("company-auth-login"));
+    });
+    expect(mocks.checkForUpdate).toHaveBeenCalledOnce();
+    await act(async () => {
+      resolve({ status: "up-to-date" });
+      await Promise.resolve();
+    });
+    expect(mocks.checkForUpdate).toHaveBeenCalledTimes(2);
+  });
 });

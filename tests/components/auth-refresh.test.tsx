@@ -175,7 +175,7 @@ describe("company auth refresh lifecycle", () => {
   it("clears local auth on catalog 401 and stays on the login gate after restart", async () => {
     server.use(
       http.post(`${TAURI_ENDPOINT}/company_auth_refresh_catalog`, () =>
-        HttpResponse.text("401 expired test_session_token_raw", {
+        HttpResponse.text("unauthorized: 登录已失效，请重新登录。", {
           status: 401,
         }),
       ),

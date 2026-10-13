@@ -60,7 +60,7 @@ function Get-CCSwitchLatestMetadata {
 
 function Read-CCSwitchProperty {
   param(
-    [Parameter(Mandatory = $true)]$Object,
+    [AllowNull()]$Object,
     [Parameter(Mandatory = $true)][string]$Name
   )
 
@@ -100,22 +100,31 @@ function Get-CCSwitchInstallerInfo {
   if ($null -eq $installer) {
     $platforms = Read-CCSwitchProperty -Object $latest -Name 'platforms'
     $platform = Read-CCSwitchProperty -Object $platforms -Name $platformKey
-    if ($null -ne $platform -and $platform.url) {
+    $platformUrl = Read-CCSwitchProperty -Object $platform -Name 'url'
+    if ($platformUrl) {
       return [pscustomobject]@{
-        Url = [string]$platform.url
+        Url = [string]$platformUrl
         Sha256 = $Sha256
-        Kind = if ([string]$platform.url -match '\.zip(\?|$)') { 'portable_zip' } else { 'msi' }
+        Kind = if ([string]$platformUrl -match '\.zip(\?|$)') { 'portable_zip' } else { 'msi' }
         Status = 'ready'
       }
     }
     Throw-CCSwitch "latest-company.json 中没有 $platformKey 安装包"
   }
 
+  $installerUrl = Read-CCSwitchProperty -Object $installer -Name 'url'
+  $installerSha = Read-CCSwitchProperty -Object $installer -Name 'sha256'
+  $installerKind = Read-CCSwitchProperty -Object $installer -Name 'kind'
+  $installerStatus = Read-CCSwitchProperty -Object $installer -Name 'status'
+  if (-not $installerUrl) {
+    Throw-CCSwitch "latest-company.json 中的 $platformKey 安装包缺少 url"
+  }
+
   return [pscustomobject]@{
-    Url = [string]$installer.url
-    Sha256 = if ($installer.sha256) { [string]$installer.sha256 } else { $Sha256 }
-    Kind = if ($installer.kind) { [string]$installer.kind } elseif ([string]$installer.url -match '\.zip(\?|$)') { 'portable_zip' } else { 'msi' }
-    Status = if ($installer.status) { [string]$installer.status } else { 'ready' }
+    Url = [string]$installerUrl
+    Sha256 = if ($installerSha) { [string]$installerSha } else { $Sha256 }
+    Kind = if ($installerKind) { [string]$installerKind } elseif ([string]$installerUrl -match '\.zip(\?|$)') { 'portable_zip' } else { 'msi' }
+    Status = if ($installerStatus) { [string]$installerStatus } else { 'ready' }
   }
 }
 

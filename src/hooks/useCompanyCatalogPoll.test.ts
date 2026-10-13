@@ -50,6 +50,7 @@ describe("useCompanyCatalogPoll", () => {
       await vi.advanceTimersByTimeAsync(3000);
     });
     expect(onDailyRefresh).toHaveBeenCalledOnce();
+    expect(window.localStorage.getItem(LAST_REFRESH_KEY)).toBeNull();
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(60_000);
@@ -92,6 +93,7 @@ describe("useCompanyCatalogPoll", () => {
       firstAttempt.reject(new Error("offline"));
       await firstAttempt.promise.catch(() => undefined);
     });
+    expect(window.localStorage.getItem(LAST_REFRESH_KEY)).toBeNull();
 
     await act(async () => {
       window.dispatchEvent(new Event("focus"));

@@ -150,7 +150,40 @@ fn switch_provider_internal(
     app_type: AppType,
     id: &str,
 ) -> Result<SwitchResult, AppError> {
-    ProviderService::switch(state, app_type, id)
+    let is_codex = matches!(app_type, AppType::Codex);
+    let mut result = ProviderService::switch(state, app_type, id)?;
+    // ProviderService has returned and released its switch lock. Production
+    // runs this in the existing spawn_blocking task; the public synchronous
+    // hook exercises the identical retry/warnings path in isolated fixtures.
+    if is_codex {
+        match crate::codex_history_migration::maybe_migrate_codex_official_history_to_unified_bucket(
+        ) {
+            Ok(outcome) => {
+                if let Some(reason) = outcome.skipped_reason {
+                    if !matches!(
+                        reason.as_str(),
+                        "already_migrated" | "unify_toggle_off" | "stock_migration_not_requested"
+                    ) {
+                        let warning = format!("Codex 历史统一检查已延期（{reason}）；停止 Codex 后，下次切换供应商或启动 CC Switch 时重试");
+                        log::warn!("{warning}");
+                        result.warnings.push(warning);
+                    }
+                } else {
+                    log::info!(
+                        "Codex history switch retry completed: jsonl_files={}, state_rows={}",
+                        outcome.migrated_jsonl_files,
+                        outcome.migrated_state_rows
+                    );
+                }
+            }
+            Err(error) => {
+                let warning = format!("Codex 历史统一检查/迁移未能完成：{error}；停止 Codex 后，下次切换供应商或启动 CC Switch 时重试");
+                log::warn!("{warning}");
+                result.warnings.push(warning);
+            }
+        }
+    }
+    Ok(result)
 }
 
 #[cfg_attr(not(feature = "test-hooks"), doc(hidden))]
@@ -1194,7 +1227,7 @@ mod import_claude_desktop_tests {
         );
         let routes = suggested_claude_desktop_routes(&p).expect("routes built");
         assert_eq!(routes.len(), 3);
-        assert_eq!(routes.get("claude-sonnet-5").unwrap().model, "GLM-4.6");
+        assert_eq!(routes.get("claude-sonnet-4-6").unwrap().model, "GLM-4.6");
         assert_eq!(routes.get("claude-opus-5").unwrap().model, "GLM-4-Air");
         assert_eq!(routes.get("claude-haiku-4-5").unwrap().model, "GLM-4-Flash");
         assert_eq!(

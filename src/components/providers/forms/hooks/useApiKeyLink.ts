@@ -82,9 +82,12 @@ export function useApiKeyLink({
   return {
     shouldShowApiKeyLink:
       appId === "claude" ||
+      appId === "claude-desktop" ||
       appId === "codex" ||
       appId === "gemini" ||
-      appId === "opencode"
+      appId === "opencode" ||
+      appId === "openclaw" ||
+      appId === "hermes"
         ? shouldShowApiKeyLink
         : false,
     websiteUrl: getWebsiteUrl,

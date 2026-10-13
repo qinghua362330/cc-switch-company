@@ -3157,6 +3157,7 @@ mod mode_tests {
         );
         crate::settings::update_settings(crate::settings::AppSettings {
             preserve_codex_official_auth_on_switch: true,
+            unify_codex_session_history: false,
             ..Default::default()
         })
         .unwrap();
@@ -3383,6 +3384,14 @@ mod mode_tests {
         .unwrap();
     }
 
+    // Old official-mode fixtures deliberately use the upstream false setting;
+    // company defaults stay enabled in production and in the new round-trip regression.
+    fn set_unified_history(on: bool) {
+        let mut settings = crate::settings::get_settings();
+        settings.unify_codex_session_history = on;
+        crate::settings::update_settings(settings).unwrap();
+    }
+
     fn chatgpt_login(account: &str) -> Value {
         json!({
             "auth_mode": "chatgpt",
@@ -3572,6 +3581,7 @@ command = "fs-server"
     async fn codex_official_switch_leaves_a_dormant_route_table() {
         let _home = Home::new();
         set_preservation(true);
+        set_unified_history(false);
         seed_codex(CODEX_USER_LIVE, Some(&chatgpt_login("acct")));
         let [a, b] = codex_a_b();
         let state = state_with(AppType::Codex, &[a, b, codex_official()], "a").await;
@@ -3640,6 +3650,7 @@ command = "fs-server"
     async fn codex_a_profile_selecting_the_built_in_openai_allows_the_official_card() {
         let _home = Home::new();
         set_preservation(true);
+        set_unified_history(false);
         let live = format!(
             "profile = \"work\"\n{CODEX_USER_LIVE}\n[profiles.work]\nmodel_provider = \"openai\"\n"
         );
@@ -7402,6 +7413,7 @@ model_provider = "c"
     async fn codex_keyless_draft_is_shown_and_saved_but_never_written_to_live() {
         let _home = Home::new();
         set_preservation(true);
+        set_unified_history(false);
         seed_codex("model = \"gpt-5.4\"\n", Some(&chatgpt_login("acct")));
         let [a, b] = codex_a_b();
         let official = codex_official();

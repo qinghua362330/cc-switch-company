@@ -160,7 +160,7 @@ async fn login_persists_redacted_state_without_exposing_secrets() {
         .unwrap()
         .contains("..."));
     let json = serde_json::to_string(&state).unwrap();
-    assert!(!json.contains("sk-test-secret-1234567890"));
+    assert!(!json.contains(&sample_login().api_key));
     assert!(!json.contains("test_session_token_1234567890"));
 }
 
@@ -257,6 +257,10 @@ async fn logout_clears_state_and_catalog_401_clears_auth() {
     );
     let service = AuthService::new(client.clone(), persistence);
 
+    let cli_config = dir.path().join("external-cli-config.toml");
+    let cli_auth = dir.path().join("external-cli-auth.json");
+    std::fs::write(&cli_config, b"model = \"personal-model\"\n").unwrap();
+    std::fs::write(&cli_auth, b"fixture-external-cli-auth").unwrap();
     service.login_with_ticket("fs_test_ok").await.unwrap();
     service.logout().await.unwrap();
     assert!(!service.get_state().await.unwrap().authenticated);
@@ -266,6 +270,14 @@ async fn logout_clears_state_and_catalog_401_clears_auth() {
     *client.catalog_result.lock().unwrap() = Some(Err(AuthError::from_status(401)));
     assert!(service.refresh_catalog().await.is_err());
     assert!(!service.get_state().await.unwrap().authenticated);
+    assert_eq!(
+        std::fs::read(&cli_config).unwrap(),
+        b"model = \"personal-model\"\n"
+    );
+    assert_eq!(
+        std::fs::read(&cli_auth).unwrap(),
+        b"fixture-external-cli-auth"
+    );
 }
 
 #[tokio::test]
@@ -322,5 +334,154 @@ fn provision_base_url_defaults_to_leharrt() {
     assert_eq!(
         ProvisionConfig::default().base_url.as_str(),
         "https://leharrt.com"
+    );
+}
+
+#[derive(Clone)]
+struct BarrierProvisionClient {
+    block_login: bool,
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+impl ProvisionClient for BarrierProvisionClient {
+    fn login<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<LoginResponse, AuthError>> {
+        Box::pin(async move {
+            if self.block_login {
+                self.started.notify_one();
+                self.release.notified().await;
+            }
+            Ok(sample_login())
+        })
+    }
+
+    fn catalog<'a>(
+        &'a self,
+        _: &'a str,
+    ) -> BoxFuture<'a, Result<(String, Vec<CatalogEntry>), AuthError>> {
+        Box::pin(async move {
+            self.started.notify_one();
+            self.release.notified().await;
+            Err(AuthError::from_status(401))
+        })
+    }
+
+    fn catalog_version<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<String, AuthError>> {
+        Box::pin(async { Ok("fixture-version".into()) })
+    }
+}
+
+#[tokio::test]
+async fn slow_login_cannot_restore_credentials_after_logout() {
+    let dir = tempfile::tempdir().unwrap();
+    let client = BarrierProvisionClient {
+        block_login: true,
+        started: Arc::new(tokio::sync::Notify::new()),
+        release: Arc::new(tokio::sync::Notify::new()),
+    };
+    let secrets = InMemorySecretStore::default();
+    let service = AuthService::new(
+        client.clone(),
+        AuthPersistence::new(
+            FileAuthMetadataStore::new(dir.path().to_path_buf()),
+            secrets.clone(),
+        ),
+    );
+    let logging_in = tokio::spawn({
+        let service = service.clone();
+        async move { service.login_with_ticket("fs_test_slow").await }
+    });
+    client.started.notified().await;
+    // Poll logout while login is blocked, then release login. Logout must be queued.
+    let mut logout = Box::pin(service.logout());
+    let finished_early = futures::poll!(&mut logout).is_ready();
+    client.release.notify_one();
+    logging_in.await.unwrap().unwrap();
+    if !finished_early {
+        logout.await.unwrap();
+    }
+    assert!(secrets.load_secrets().unwrap().is_none());
+    assert!(!service.get_state().await.unwrap().authenticated);
+}
+
+#[tokio::test]
+async fn capability_only_refresh_keeps_company_tokens_and_protocol() {
+    let dir = tempfile::tempdir().unwrap();
+    let client = MockProvisionClient::default();
+    *client.login_result.lock().unwrap() = Some(Ok(sample_login()));
+    let secrets = InMemorySecretStore::default();
+    let service = AuthService::new(
+        client.clone(),
+        AuthPersistence::new(
+            FileAuthMetadataStore::new(dir.path().to_path_buf()),
+            secrets.clone(),
+        ),
+    );
+    service.login_with_ticket("fs_test_ok").await.unwrap();
+    let before = secrets.load_secrets().unwrap();
+    let mut catalog = sample_catalog();
+    catalog[0].model_capabilities = Some(std::collections::BTreeMap::from([(
+        "gpt-5.5".into(),
+        serde_json::json!({
+            "supported_reasoning_levels": [{"effort": "high", "description": "High"}, {"effort": "ultra", "description": "Ultra"}],
+            "default_reasoning_level": "high",
+            "additional_speed_tiers": ["fast"],
+            "service_tiers": [{"id": "priority", "name": "Priority", "description": "Priority tier"}],
+            "context_window": 272000
+        }),
+    )]));
+    *client.catalog_result.lock().unwrap() =
+        Some(Ok(("https://leharrt.com".into(), catalog.clone())));
+    let state = service.refresh_catalog().await.unwrap();
+    assert_eq!(state.catalog, catalog);
+    assert_eq!(service.current_login().await.unwrap().catalog, catalog);
+    assert_eq!(secrets.load_secrets().unwrap(), before);
+}
+
+#[tokio::test]
+async fn slow_refresh_401_cannot_clear_a_later_login() {
+    let dir = tempfile::tempdir().unwrap();
+    let client = BarrierProvisionClient {
+        block_login: false,
+        started: Arc::new(tokio::sync::Notify::new()),
+        release: Arc::new(tokio::sync::Notify::new()),
+    };
+    let secrets = InMemorySecretStore::default();
+    let metadata = FileAuthMetadataStore::new(dir.path().to_path_buf());
+    let initial = MockProvisionClient::default();
+    *initial.login_result.lock().unwrap() = Some(Ok(sample_login()));
+    AuthService::new(
+        initial,
+        AuthPersistence::new(metadata.clone(), secrets.clone()),
+    )
+    .login_with_ticket("fs_initial")
+    .await
+    .unwrap();
+    let service = AuthService::new(
+        client.clone(),
+        AuthPersistence::new(metadata, secrets.clone()),
+    );
+    let refreshing = tokio::spawn({
+        let service = service.clone();
+        async move { service.refresh_catalog().await }
+    });
+    client.started.notified().await;
+    let mut login = Box::pin(service.login_with_ticket("fs_new_login"));
+    let completed_early = match futures::poll!(&mut login) {
+        std::task::Poll::Ready(result) => {
+            result.unwrap();
+            true
+        }
+        std::task::Poll::Pending => false,
+    };
+    client.release.notify_one();
+    refreshing.await.unwrap().unwrap_err();
+    if !completed_early {
+        login.await.unwrap();
+    }
+    assert!(service.get_state().await.unwrap().authenticated);
+    assert_eq!(
+        secrets.load_secrets().unwrap().unwrap().api_key,
+        sample_login().api_key
     );
 }

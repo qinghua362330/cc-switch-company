@@ -16,8 +16,7 @@ const steps = [
   {
     icon: PanelsTopLeft,
     title: "点击顶部 Codex 图标",
-    description:
-      "在顶部工具栏找到 Codex 图标，点击后进入 Codex 配置列表。",
+    description: "在顶部工具栏找到 Codex 图标，点击后进入 Codex 配置列表。",
   },
   {
     icon: Bot,

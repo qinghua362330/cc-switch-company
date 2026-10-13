@@ -218,9 +218,8 @@ mod mac_keychain_tests {
 
         let saved_passwords = backend.saved_passwords.borrow();
         assert_eq!(saved_passwords.len(), 1);
-        let saved = std::str::from_utf8(&saved_passwords[0]).unwrap();
-        assert!(saved.contains("test_session_token_1234567890"));
-        assert!(saved.contains("sk-test-secret-1234567890"));
+        let saved: AuthSecrets = serde_json::from_slice(&saved_passwords[0]).unwrap();
+        assert_eq!(saved, sample_secrets());
     }
 
     #[test]

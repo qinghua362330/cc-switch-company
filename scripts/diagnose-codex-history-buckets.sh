@@ -3,7 +3,7 @@ set -euo pipefail
 
 MODE="diagnose"
 TARGET_PROVIDER="custom"
-SOURCE_PROVIDERS="openai,hellotalk,ccswitch"
+SOURCE_PROVIDERS="openai,hellotalk,ccswitch,cc-switch-official"
 CODEX_DIR="${CODEX_HOME:-$HOME/.codex}"
 CC_SWITCH_DIR="${CC_SWITCH_HOME:-$HOME/.cc-switch}"
 
@@ -15,6 +15,7 @@ Usage:
 
 Default mode is read-only. --repair rewrites Codex history metadata to the
 target provider after creating backups under ~/.cc-switch/backups/.
+Stop Codex writers before --repair; open or changing JSONL files are refused.
 EOF
 }
 
@@ -70,6 +71,7 @@ import pathlib
 import re
 import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
 
@@ -78,6 +80,11 @@ codex_dir = pathlib.Path(codex_dir_arg).expanduser()
 cc_switch_dir = pathlib.Path(cc_switch_dir_arg).expanduser()
 sources = {item.strip() for item in sources_arg.split(",") if item.strip()}
 sources.discard(target)
+diagnostic_errors = []
+
+def record_error(message):
+    diagnostic_errors.append(message)
+    print(f"ERROR: {message}", file=sys.stderr)
 
 def section(title):
     print(f"\n== {title} ==")
@@ -88,7 +95,8 @@ def read_text(path):
     except FileNotFoundError:
         return ""
     except Exception as exc:
-        return f"<read error: {exc}>"
+        record_error(f"Unable to read {path}: {exc}")
+        return ""
 
 def toml_model_provider(text):
     match = re.search(r'(?m)^\s*model_provider\s*=\s*"([^"]+)"', text)
@@ -127,6 +135,7 @@ def scan_jsonl():
                     file_providers.add(provider)
         except Exception as exc:
             errors.append((str(path), str(exc)))
+            record_error(f"Unable to scan JSONL {path}: {exc}")
         if file_providers:
             files.append((path, file_providers))
     return counts, examples, errors, files
@@ -154,6 +163,7 @@ def scan_state_dbs():
             results[str(path)] = rows
         except Exception as exc:
             results[str(path)] = [("<error>", str(exc))]
+            record_error(f"Unable to scan state DB {path}: {exc}")
     return results
 
 def scan_cc_switch_db():
@@ -180,70 +190,98 @@ def scan_cc_switch_db():
             conn.close()
     except Exception as exc:
         rows.append({"error": str(exc)})
+        record_error(f"Unable to scan CC Switch DB {db_path}: {exc}")
     return rows
 
 def backup_path_for(backup_root, path):
-    try:
-        rel = path.resolve().relative_to(codex_dir.resolve())
-    except Exception:
-        rel = pathlib.Path("external") / path.name
+    # Refuse external/symlink targets rather than collapsing them to a basename.
+    rel = path.resolve().relative_to(codex_dir.resolve())
     return backup_root / rel
+
+def has_open_handles(path):
+    lsof = shutil.which("lsof")
+    if not lsof:
+        raise RuntimeError("lsof is required to check active JSONL writers; stop Codex before repair")
+    result = subprocess.run([lsof, "-t", "--", str(path)], capture_output=True, text=True, timeout=10)
+    if result.returncode not in (0, 1) or result.stderr.strip():
+        raise RuntimeError(f"Unable to check open JSONL handles for {path}")
+    return result.returncode == 0 or bool(result.stdout.strip())
+
+def file_identity(path):
+    stat = path.stat()
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+def stable_jsonl_snapshot(path):
+    if path.is_symlink():
+        raise RuntimeError(f"Refusing symlink JSONL: {path}")
+    if has_open_handles(path):
+        raise RuntimeError(f"Refusing active/open JSONL: {path}; stop Codex first")
+    identity = file_identity(path)
+    original = path.read_bytes()
+    if file_identity(path) != identity:
+        raise RuntimeError(f"JSONL changed while reading: {path}")
+    return identity, original
 
 def rewrite_jsonl_files(backup_root):
     changed_files = 0
     changed_lines = 0
     for path in iter_jsonl_files():
-        try:
-            original = path.read_text(encoding="utf-8")
-        except Exception:
-            continue
-        changed = False
+        identity, original_bytes = stable_jsonl_snapshot(path)
+        original = original_bytes.decode("utf-8")
+        file_changes = 0
         next_lines = []
         for segment in original.splitlines(keepends=True):
-            line = segment[:-1] if segment.endswith("\n") else segment
-            newline = "\n" if segment.endswith("\n") else ""
+            line = segment.rstrip("\r\n")
+            newline = segment[len(line):]
             next_line = line
             if '"session_meta"' in line and '"model_provider"' in line:
-                try:
-                    record = json.loads(line)
-                    payload = record.get("payload")
-                    if record.get("type") == "session_meta" and isinstance(payload, dict):
-                        if payload.get("model_provider") in sources:
-                            payload["model_provider"] = target
-                            next_line = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
-                            changed = True
-                            changed_lines += 1
-                except Exception:
-                    pass
+                record = json.loads(line)
+                payload = record.get("payload")
+                if record.get("type") == "session_meta" and isinstance(payload, dict):
+                    if payload.get("model_provider") in sources:
+                        payload["model_provider"] = target
+                        next_line = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+                        file_changes += 1
             next_lines.append(next_line + newline)
-        if changed:
-            dst = backup_path_for(backup_root / "jsonl", path)
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(path, dst)
-            fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        if not file_changes:
+            continue
+        dst = backup_path_for(backup_root / "jsonl", path)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, dst)
+        fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
                 handle.write("".join(next_lines))
+                handle.flush()
+                os.fsync(handle.fileno())
             shutil.copymode(path, tmp_name)
+            if has_open_handles(path) or file_identity(path) != identity or path.read_bytes() != original_bytes:
+                raise RuntimeError(f"JSONL changed or became active before replacement: {path}")
             os.replace(tmp_name, path)
             changed_files += 1
+            changed_lines += file_changes
+        finally:
+            if os.path.exists(tmp_name):
+                os.unlink(tmp_name)
     return changed_files, changed_lines
 
 def rewrite_state_dbs(backup_root):
     changed_rows = 0
     for path in state_db_paths():
+        backup = backup_path_for(backup_root / "state", path)
+        if path.is_symlink():
+            raise RuntimeError(f"Refusing symlink state DB: {path}")
+        conn = sqlite3.connect(str(path), timeout=5)
         try:
-            conn = sqlite3.connect(str(path), timeout=5)
-            conn.execute("PRAGMA busy_timeout = 5000")
             placeholders = ",".join("?" for _ in sources)
             if not placeholders:
-                conn.close()
                 continue
+            # Hold the write reservation across the backup and update.
+            conn.execute("BEGIN IMMEDIATE")
             count_sql = f"SELECT COUNT(*) FROM threads WHERE model_provider IN ({placeholders})"
             count = conn.execute(count_sql, tuple(sources)).fetchone()[0]
             if count <= 0:
-                conn.close()
                 continue
-            backup = backup_root / "state" / path.name
             backup.parent.mkdir(parents=True, exist_ok=True)
             src = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
             dst = sqlite3.connect(str(backup), timeout=5)
@@ -256,9 +294,8 @@ def rewrite_state_dbs(backup_root):
             cursor = conn.execute(update_sql, (target, *tuple(sources)))
             conn.commit()
             changed_rows += cursor.rowcount or 0
+        finally:
             conn.close()
-        except Exception as exc:
-            print(f"state db repair skipped for {path}: {exc}")
     return changed_rows
 
 config_text = read_text(codex_dir / "config.toml")
@@ -281,7 +318,7 @@ if settings_text and not settings_text.startswith("<read error"):
         migrations = settings.get("localMigrations") or {}
         print(f"codexOfficialHistoryUnifyV1: {migrations.get('codexOfficialHistoryUnifyV1')}")
     except Exception as exc:
-        print(f"settings parse error: {exc}")
+        record_error(f"settings parse error: {exc}")
 else:
     print("settings.json not found")
 
@@ -320,7 +357,9 @@ for rows in state_results.values():
             problem_sources.add(provider)
 
 section("Diagnosis")
-if live_provider == target and problem_sources:
+if diagnostic_errors:
+    print("FAILED: diagnosis is incomplete; repair is refused.")
+elif live_provider == target and problem_sources:
     print(f"LIKELY ISSUE: live provider is {target}, but history still exists in {sorted(problem_sources)}.")
     print(f"Run with --repair to move those buckets to {target}.")
 elif live_provider == target:
@@ -328,16 +367,30 @@ elif live_provider == target:
 else:
     print(f"NOTE: live provider is {live_provider}. If CCS expects {target}, switch/enable the CCS Codex card first.")
 
-if mode == "repair":
+if mode == "repair" and not diagnostic_errors:
     section("Repair")
-    backup_root = cc_switch_dir / "backups" / ("codex-history-bucket-repair-" + dt.datetime.now().strftime("%Y%m%d-%H%M%S"))
-    backup_root.mkdir(parents=True, exist_ok=True)
-    changed_files, changed_lines = rewrite_jsonl_files(backup_root)
-    changed_rows = rewrite_state_dbs(backup_root)
-    print(f"target_provider: {target}")
-    print(f"sources: {sorted(sources)}")
-    print(f"jsonl_files_changed: {changed_files}")
-    print(f"jsonl_lines_changed: {changed_lines}")
-    print(f"sqlite_rows_changed: {changed_rows}")
-    print(f"backup_dir: {backup_root}")
+    backup_parent = cc_switch_dir / "backups"
+    backup_root = None
+    try:
+        # Preflight every JSONL before any repair so an active writer stops the run early.
+        for path in iter_jsonl_files():
+            stable_jsonl_snapshot(path)
+        backup_parent.mkdir(parents=True, exist_ok=True)
+        backup_root = pathlib.Path(tempfile.mkdtemp(
+            prefix="codex-history-bucket-repair-" + dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-",
+            dir=str(backup_parent)))
+        changed_files, changed_lines = rewrite_jsonl_files(backup_root)
+        changed_rows = rewrite_state_dbs(backup_root)
+        print(f"target_provider: {target}")
+        print(f"sources: {sorted(sources)}")
+        print(f"jsonl_files_changed: {changed_files}")
+        print(f"jsonl_lines_changed: {changed_lines}")
+        print(f"sqlite_rows_changed: {changed_rows}")
+        print(f"backup_dir: {backup_root}")
+    except Exception as exc:
+        record_error(f"Repair failed: {exc}")
+        print(f"Partial changes may exist; original backups: {backup_root or '<not created>'}", file=sys.stderr)
+
+if diagnostic_errors:
+    raise SystemExit(1)
 PY

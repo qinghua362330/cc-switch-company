@@ -17,6 +17,7 @@ export type {
   CompanyAuthState,
   CompanyAuthUser,
   CompanyCatalogItem,
+  CompanyModelCapabilities,
   CompanyCatalogRefresh,
   CompanyFeishuLoginStart,
   CompanyProviderSyncResult,
@@ -62,7 +63,11 @@ export function toCompanyAuthError(error: unknown): CompanyAuthError {
       "invalid_ticket",
     );
   }
-  if (lower.startsWith("forbidden:") || lower.includes("403") || lower.includes("forbidden")) {
+  if (
+    lower.startsWith("forbidden:") ||
+    lower.includes("403") ||
+    lower.includes("forbidden")
+  ) {
     return new CompanyAuthError(
       "当前飞书租户无权限使用公司客户端。",
       "forbidden",

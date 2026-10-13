@@ -38,6 +38,20 @@ export async function getCurrentVersion(): Promise<string> {
   }
 }
 
+function isCompanyUpdateAvailable(current: string, latest: string): boolean {
+  // Older company builds reported only the upstream version (iteration zero).
+  // Company iterations are patches on that base, not a SemVer beta channel.
+  const pattern = /^(\d+\.\d+\.\d+)(?:-company\.([1-9]\d*))?$/;
+  const installed = current.match(pattern);
+  const offered = latest.match(pattern);
+  if (installed && offered && installed[1] === offered[1]) {
+    const currentIteration = BigInt(installed[2] ?? "0");
+    const latestIteration = BigInt(offered[2] ?? "0");
+    return latestIteration > currentIteration;
+  }
+  return isUpdateAvailable(current, latest);
+}
+
 export async function checkForUpdate(
   opts: CheckOptions = {},
 ): Promise<
@@ -49,7 +63,7 @@ export async function checkForUpdate(
     "check_cc_switch_update_manifest",
     { manifestUrl: opts.manifestUrl },
   );
-  if (!isUpdateAvailable(currentVersion, manifest.version)) {
+  if (!isCompanyUpdateAvailable(currentVersion, manifest.version)) {
     return { status: "up-to-date" };
   }
 

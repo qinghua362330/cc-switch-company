@@ -71,6 +71,20 @@ describe("checkForUpdate", () => {
     expect(mocks.check).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["4.0.10", "4.0.10-company.1", "available"],
+    ["4.0.10-company.2", "4.0.10-company.10", "available"],
+    ["4.0.10-company.10", "4.0.10-company.2", "up-to-date"],
+    ["4.0.10-company.2", "4.0.10-company.2", "up-to-date"],
+    ["4.0.10-company.2", "4.0.10", "up-to-date"],
+    ["4.0.10-company.2", "4.0.11-company.1", "available"],
+    ["4.0.11-company.1", "4.0.10-company.99", "up-to-date"],
+  ])("公司版本 %s → %s 返回 %s", async (current, latest, status) => {
+    mocks.getVersion.mockResolvedValue(current);
+    mocks.invoke.mockResolvedValue({ version: latest });
+    expect((await checkForUpdate()).status).toBe(status);
+  });
+
   it("公司远程清单不可用时直接暴露错误，不切换到公共更新渠道", async () => {
     mocks.invoke.mockRejectedValue(new Error("manifest unavailable"));
 

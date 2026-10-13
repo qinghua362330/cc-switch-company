@@ -2,7 +2,7 @@ name: Upstream Sync
 
 # 全自动同步上游：定时/手动拉取 farion1231/cc-switch 的 main，
 # 合并进公司分支；合并成功且校验通过则自动计算 tag 并推送，
-# tag 推送会触发 company-release.yml 出包（Windows MSI + macOS tar.gz），
+# GITHUB_TOKEN 推 tag 后显式 dispatch company-release.yml 出包，
 # 出包完成后客户端即可通过 latest-company.json 收到自动更新。
 #
 # 冲突或校验失败时不推送、不发 tag，改为开 issue 通知人工介入。
@@ -27,6 +27,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
   issues: write
   pull-requests: write
 
@@ -54,6 +55,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          ref: main
           # 需要能 push tag，用默认 GITHUB_TOKEN 即可（contents: write）
           token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -64,9 +66,10 @@ jobs:
 
       - name: Add upstream remote and fetch
         id: fetch
+        env:
+          REF: ${{ github.event.inputs.upstream_ref || 'main' }}
         run: |
           set -euo pipefail
-          REF="${{ github.event.inputs.upstream_ref || 'main' }}"
           git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" 2>/dev/null || true
           git fetch --no-tags upstream "$REF"
           UPSTREAM_SHA="$(git rev-parse FETCH_HEAD)"
@@ -93,14 +96,13 @@ jobs:
         if: steps.need.outputs.skip == 'false'
         continue-on-error: true
         run: |
-          set -uo pipefail
+          set -euo pipefail
           git merge --no-edit FETCH_HEAD
           echo "clean=true" >> "$GITHUB_OUTPUT"
-          exit 0
 
       - name: Collect conflict list
         id: conflicts
-        if: steps.need.outputs.skip == 'false' && steps.merge.outcome == 'failure'
+        if: always() && steps.need.outputs.skip == 'false' && steps.merge.outcome == 'failure'
         run: |
           set -uo pipefail
           {
@@ -111,8 +113,12 @@ jobs:
           echo "count=$(git diff --name-only --diff-filter=U | wc -l)" >> "$GITHUB_OUTPUT"
 
       - name: Abort merge on conflict
-        if: steps.need.outputs.skip == 'false' && steps.merge.outcome == 'failure'
-        run: git merge --abort
+        if: always() && steps.need.outputs.skip == 'false' && steps.merge.outcome == 'failure'
+        run: |
+          set -euo pipefail
+          if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
+            git merge --abort
+          fi
 
       - name: Setup pnpm
         if: steps.merge.outcome == 'success'
@@ -142,7 +148,13 @@ jobs:
         id: unittests
         if: steps.merge.outcome == 'success'
         continue-on-error: true
-        run: pnpm test:unit
+        env:
+          CC_SWITCH_TEST_HOME: ${{ runner.temp }}/cc-switch-upstream-sync-tests
+        run: |
+          set -euo pipefail
+          mkdir -p "$CC_SWITCH_TEST_HOME"
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/scripts -p test_company_release_safety.py -v
+          pnpm vitest run --maxWorkers=2 --minWorkers=1 --testTimeout=15000 --hookTimeout=15000
 
       - name: Setup Rust
         if: steps.merge.outcome == 'success' && steps.typecheck.outcome == 'success' && steps.unittests.outcome == 'success'
@@ -189,32 +201,64 @@ jobs:
 
       - name: Push merge commit
         id: push
-        if: steps.merge.outcome == 'success' && steps.typecheck.outcome == 'success' && steps.unittests.outcome == 'success' && steps.cargocheck.outcome == 'success'
+        if: steps.merge.outcome == 'success' && steps.typecheck.outcome == 'success' && steps.unittests.outcome == 'success' && steps.cargocheck.outcome == 'success' && (github.event.inputs.mode || 'auto') == 'auto'
         run: |
           set -euo pipefail
           git push origin HEAD:main
 
-      - name: Push tag to trigger release
-        if: steps.tag.outputs.tag != '' && (github.event.inputs.mode || 'auto') == 'auto'
+      - name: Push tag
+        id: pushtag
+        if: steps.push.outcome == 'success' && steps.tag.outputs.tag != ''
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
           set -euo pipefail
-          git tag "${{ steps.tag.outputs.tag }}"
-          git push origin "${{ steps.tag.outputs.tag }}"
-          echo "已推送 tag，company-release.yml 将开始出包"
+          git tag "$TAG"
+          git push origin "refs/tags/$TAG"
 
-      - name: Open PR instead of tagging (prepare mode)
-        if: steps.push.outcome == 'success' && github.event.inputs.mode == 'prepare'
+      - name: Dispatch company release
+        id: dispatch
+        if: steps.pushtag.outcome == 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          gh pr create --base main --head "${{ github.ref_name }}" \
-            --title "chore(sync): 上游 v${{ steps.versions.outputs.upstream_version }} 同步" \
-            --body "本 PR 由 upstream-sync 自动生成，已通过 typecheck / unit tests / cargo check。合并后请手动打 tag 触发 company-release.yml。" \
-            || echo "PR 创建失败（可能无差异），忽略"
+          set -euo pipefail
+          gh workflow run company-release.yml --ref main -f "tag=$TAG"
+
+      - name: Push preparation branch
+        id: prepare
+        if: steps.merge.outcome == 'success' && steps.typecheck.outcome == 'success' && steps.unittests.outcome == 'success' && steps.cargocheck.outcome == 'success' && github.event.inputs.mode == 'prepare'
+        run: |
+          set -euo pipefail
+          BRANCH="sync/upstream-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          git push origin "HEAD:refs/heads/$BRANCH"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Open PR instead of tagging (prepare mode)
+        id: pr
+        if: steps.prepare.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ steps.prepare.outputs.branch }}
+          UPSTREAM_VERSION: ${{ steps.versions.outputs.upstream_version }}
+        run: |
+          set -euo pipefail
+          gh pr create --base main --head "$BRANCH" \
+            --title "chore(sync): 上游 v$UPSTREAM_VERSION 同步" \
+            --body "本 PR 已通过 typecheck / unit tests / cargo check。合并后创建公司 tag 并显式 dispatch company-release.yml。"
 
       - name: Summarize outcome
         id: outcome
         if: always()
+        env:
+          MODE: ${{ github.event.inputs.mode || 'auto' }}
+          PUSH: ${{ steps.push.outcome }}
+          PUSH_TAG: ${{ steps.pushtag.outcome }}
+          DISPATCH: ${{ steps.dispatch.outcome }}
+          PREPARE: ${{ steps.prepare.outcome }}
+          PR: ${{ steps.pr.outcome }}
+          CONFLICT_COUNT: ${{ steps.conflicts.outputs.count }}
         run: |
           set -uo pipefail
           TYPE="${{ steps.typecheck.outcome }}"
@@ -224,8 +268,17 @@ jobs:
           SKIP="${{ steps.need.outputs.skip }}"
           RESULT="unknown"
           if [ "$SKIP" = "true" ]; then RESULT="up-to-date"
-          elif [ "$MERGE" = "failure" ]; then RESULT="conflict"
-          elif [ "$TYPE" = "success" ] && [ "$UNIT" = "success" ] && [ "$CARGO" = "success" ]; then RESULT="released"
+          elif [ "$MERGE" = "failure" ]; then
+            if [ "${CONFLICT_COUNT:-0}" -gt 0 ]; then RESULT="conflict"
+            else RESULT="merge-failed"; fi
+          elif [ "$TYPE" = "success" ] && [ "$UNIT" = "success" ] && [ "$CARGO" = "success" ]; then
+            if [ "$MODE" = "prepare" ]; then
+              if [ "$PREPARE" = "success" ] && [ "$PR" = "success" ]; then RESULT="prepared"
+              else RESULT="prepare-failed"; fi
+            elif [ "$PUSH" != "success" ]; then RESULT="push-failed"
+            elif [ "$PUSH_TAG" != "success" ]; then RESULT="tag-failed"
+            elif [ "$DISPATCH" != "success" ]; then RESULT="dispatch-failed"
+            else RESULT="release-dispatched"; fi
           elif [ "$MERGE" = "success" ]; then RESULT="verification-failed"
           fi
           {
@@ -238,6 +291,8 @@ jobs:
 
       - name: Write issue bodies
         if: always()
+        env:
+          CONFLICT_FILES: ${{ steps.conflicts.outputs.files }}
         run: |
           mkdir -p /tmp/sync-issue
 
@@ -251,13 +306,13 @@ jobs:
           {
             echo ""
             echo '```'
-            git diff --name-only --diff-filter=U 2>/dev/null | head -60 || true
+            printf '%s\n' "$CONFLICT_FILES"
             echo '```'
             echo ""
             echo "处理方式："
             echo "1. \`git remote add upstream https://github.com/farion1231/cc-switch.git && git fetch upstream main\`"
             echo "2. \`git merge upstream/main\` 手工解冲突"
-            echo "3. 解决后推送 main，再打 \`v<package.json 版本>-company.<N>\` tag 触发发版"
+            echo "3. 解决后推送 main，再打 \`v<package.json 版本>-company.<N>\` tag 并显式 dispatch company-release.yml"
           } >> /tmp/sync-issue/conflict.md
 
           cat > /tmp/sync-issue/verify.md <<'MD'

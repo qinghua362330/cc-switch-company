@@ -3,6 +3,7 @@ import {
   type CompanyAuthState,
   type CompanyAuthUser,
   type CompanyCatalogItem,
+  type CompanyModelCapabilities,
   type CompanyCatalogRefresh,
   type CompanyFeishuLoginStart,
 } from "@/lib/api/companyAuthTypes";
@@ -63,6 +64,71 @@ const readStringArray = (value: unknown): readonly string[] =>
         .map(redactUiString)
     : [];
 
+const normalizeCapabilityOptions = (
+  value: unknown,
+  fields: readonly string[],
+) =>
+  Array.isArray(value)
+    ? value.flatMap<string | Record<string, string>>((item) => {
+        if (typeof item === "string") return [redactUiString(item)];
+        if (!isRecord(item)) return [];
+        const pairs = fields.flatMap((field) => {
+          const text = readUiString(item[field]);
+          return text === null ? [] : [[field, text]];
+        });
+        return pairs.length ? [Object.fromEntries(pairs)] : [];
+      })
+    : undefined;
+
+const normalizeModelCapabilities = (
+  value: unknown,
+): Readonly<Record<string, CompanyModelCapabilities>> | undefined => {
+  if (!isRecord(value)) return undefined;
+  const capabilities: Record<string, CompanyModelCapabilities> = {};
+  // Stable ordering makes snake/camel and reordered maps compare equally.
+  for (const model of Object.keys(value).sort()) {
+    const raw = value[model];
+    if (!isRecord(raw)) continue;
+    const normalized: Record<string, unknown> = {};
+    for (const [snake, camel] of [
+      ["supported_reasoning_levels", "supportedReasoningLevels"],
+      ["default_reasoning_level", "defaultReasoningLevel"],
+      ["additional_speed_tiers", "additionalSpeedTiers"],
+      ["service_tiers", "serviceTiers"],
+      ["context_window", "contextWindow"],
+      ["max_context_window", "maxContextWindow"],
+      ["default_service_tier", "defaultServiceTier"],
+    ] as const) {
+      const field = raw[snake] ?? raw[camel];
+      if (field === undefined || field === null) continue;
+      if (snake === "supported_reasoning_levels" || snake === "service_tiers") {
+        const options = normalizeCapabilityOptions(
+          field,
+          snake === "supported_reasoning_levels"
+            ? ["effort", "description"]
+            : ["id", "name", "description"],
+        );
+        if (options !== undefined) normalized[snake] = options;
+      } else if (snake === "additional_speed_tiers") {
+        if (Array.isArray(field)) normalized[snake] = readStringArray(field);
+      } else if (snake === "context_window" || snake === "max_context_window") {
+        if (
+          typeof field === "number" &&
+          Number.isSafeInteger(field) &&
+          field > 0
+        )
+          normalized[snake] = field;
+      } else {
+        const text = readUiString(field);
+        if (text !== null) normalized[snake] = text;
+      }
+    }
+    // Only the declared capability fields cross into React; unknown secret fields do not.
+    capabilities[redactUiString(model)] = normalized;
+  }
+  return capabilities;
+};
+
 const normalizeCatalogItem = (value: unknown): CompanyCatalogItem | null => {
   if (!isRecord(value)) return null;
 
@@ -72,6 +138,9 @@ const normalizeCatalogItem = (value: unknown): CompanyCatalogItem | null => {
   const defaultModel = readUiString(value.default_model ?? value.defaultModel);
   const models = readStringArray(value.models);
   const group = readUiString(value.group);
+  const modelCapabilities = normalizeModelCapabilities(
+    value.model_capabilities ?? value.modelCapabilities,
+  );
 
   if (
     !tool ||
@@ -91,6 +160,7 @@ const normalizeCatalogItem = (value: unknown): CompanyCatalogItem | null => {
     defaultModel,
     models,
     group,
+    ...(modelCapabilities !== undefined ? { modelCapabilities } : {}),
   };
 };
 

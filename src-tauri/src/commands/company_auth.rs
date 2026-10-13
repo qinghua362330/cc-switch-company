@@ -43,7 +43,7 @@ pub async fn company_auth_login_with_ticket(
 ) -> Result<AuthState, String> {
     state
         .0
-        .read()
+        .write()
         .await
         .login_with_ticket(&ticket)
         .await
@@ -56,7 +56,7 @@ pub async fn company_auth_refresh_catalog(
 ) -> Result<AuthState, String> {
     state
         .0
-        .read()
+        .write()
         .await
         .refresh_catalog()
         .await
@@ -81,10 +81,9 @@ pub async fn company_auth_sync_providers(
     auth_state: State<'_, CompanyAuthState>,
     app_state: State<'_, AppState>,
 ) -> Result<CompanyProviderSyncResult, String> {
-    let login = auth_state
-        .0
-        .read()
-        .await
+    // Hold the guard through projection: logout/login must not overtake this snapshot.
+    let auth_guard = auth_state.0.read().await;
+    let login = auth_guard
         .current_login()
         .await
         .map_err(|err| err.to_command_error())?;
@@ -96,7 +95,7 @@ pub async fn company_auth_sync_providers(
 pub async fn company_auth_logout(state: State<'_, CompanyAuthState>) -> Result<AuthState, String> {
     state
         .0
-        .read()
+        .write()
         .await
         .logout()
         .await
@@ -114,17 +113,50 @@ fn sync_company_providers(
 ) -> Result<CompanyProviderSyncResult, crate::error::AppError> {
     let mut synced = 0;
     let created_at = current_timestamp_millis();
+    let mut active_ids = std::collections::HashSet::new();
 
     for entry in &login.catalog {
         let Some((app_type, provider)) = company_catalog_provider(entry, login, created_at) else {
             continue;
         };
 
+        active_ids.insert((app_type.as_str().to_string(), provider.id.clone()));
         upsert_company_provider(state, app_type, provider)?;
         synced += 1;
     }
 
+    // Keep stale rows (including current/live and Stack members) and their CLI
+    // credentials intact. Annotate only company-owned cards; never delete rows.
+    for app_type in [AppType::Claude, AppType::Codex, AppType::Gemini] {
+        let _switch_guard = crate::mode::controller::lock_settled_blocking(state, &app_type)?;
+        for (_, mut provider) in state.db.get_all_providers(app_type.as_str())? {
+            if !is_company_provider(&provider)
+                || active_ids.contains(&(app_type.as_str().to_string(), provider.id.clone()))
+            {
+                continue;
+            }
+            let notes = provider.notes.get_or_insert_with(String::new);
+            if !notes.contains(STALE_COMPANY_NOTE) {
+                if !notes.is_empty() {
+                    notes.push('\n');
+                }
+                notes.push_str(STALE_COMPANY_NOTE);
+                state.db.save_provider(app_type.as_str(), &provider)?;
+            }
+        }
+    }
+
     Ok(CompanyProviderSyncResult { synced })
+}
+
+const STALE_COMPANY_NOTE: &str = "已从公司目录移除（保留本地配置）";
+
+fn is_company_provider(provider: &Provider) -> bool {
+    provider.meta.as_ref().is_some_and(|meta| {
+        meta.provider_type.as_deref() == Some("company_auth")
+            || (meta.provider_type.is_none()
+                && meta.partner_promotion_key.as_deref() == Some("company_pool"))
+    })
 }
 
 fn upsert_company_provider(
@@ -132,15 +164,37 @@ fn upsert_company_provider(
     app_type: AppType,
     provider: Provider,
 ) -> Result<(), crate::error::AppError> {
-    let exists = state
+    let existing = state
         .db
-        .get_provider_by_id(&provider.id, app_type.as_str())?
-        .is_some();
+        .get_provider_by_id(&provider.id, app_type.as_str())?;
 
-    if exists {
-        ProviderService::update(state, app_type, None, provider)?;
+    if let Some(mut existing) = existing {
+        if !is_company_provider(&existing) {
+            return Err(crate::error::AppError::InvalidInput(
+                "公司目录卡片 ID 与个人配置冲突".to_string(),
+            ));
+        }
+        // Keep card ordering, creation time, user notes and unrelated metadata.
+        existing.name = provider.name;
+        existing.settings_config = provider.settings_config;
+        existing.website_url = provider.website_url;
+        if let Some(notes) = existing.notes.as_mut() {
+            *notes = notes
+                .lines()
+                .filter(|line| *line != STALE_COMPANY_NOTE)
+                .collect::<Vec<_>>()
+                .join("\n");
+        }
+        let generated_meta = provider.meta.expect("company provider metadata");
+        let meta = existing.meta.get_or_insert_with(Default::default);
+        meta.provider_type = generated_meta.provider_type;
+        meta.partner_promotion_key = generated_meta.partner_promotion_key;
+        meta.is_partner = generated_meta.is_partner;
+        meta.api_format = generated_meta.api_format;
+        ProviderService::update(state, app_type, None, existing)?;
     } else {
-        ProviderService::add(state, app_type, provider, false)?;
+        // Catalog discovery must not replace an external CLI login/config.
+        ProviderService::add_without_switching(state, app_type, provider)?;
     }
 
     Ok(())
@@ -290,12 +344,12 @@ fn company_provider_meta(entry: &CatalogEntry, app_type: &AppType) -> ProviderMe
         ..Default::default()
     };
 
-    if matches!(app_type, AppType::Codex) {
-        meta.api_format = Some("openai_responses".to_string());
-    } else if entry.protocol.eq_ignore_ascii_case("openai-responses") {
+    if entry.protocol.eq_ignore_ascii_case("openai-responses") {
         meta.api_format = Some("openai_responses".to_string());
     } else if entry.protocol.eq_ignore_ascii_case("openai-chat") {
         meta.api_format = Some("openai_chat".to_string());
+    } else if matches!(app_type, AppType::Codex) {
+        meta.api_format = Some("openai_responses".to_string());
     }
 
     meta
@@ -308,25 +362,11 @@ pub fn normalize_company_codex_providers(
     let providers = state.db.get_all_providers(AppType::Codex.as_str())?;
 
     for (_, mut provider) in providers {
-        let is_company_provider = provider.id.starts_with("company-codex-")
-            || provider
-                .meta
-                .as_ref()
-                .and_then(|meta| meta.provider_type.as_deref())
-                == Some("company_auth");
-
-        if !is_company_provider {
+        if !is_company_provider(&provider) {
             continue;
         }
 
         let mut changed = false;
-
-        if let Some(meta) = provider.meta.as_mut() {
-            if meta.api_format.as_deref() != Some("openai_responses") {
-                meta.api_format = Some("openai_responses".to_string());
-                changed = true;
-            }
-        }
 
         if let Some(config_text) = provider
             .settings_config
@@ -627,6 +667,234 @@ mod tests {
             },
             catalog: vec![sample_entry()],
         }
+    }
+
+    struct IsolatedHome {
+        _dir: tempfile::TempDir,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl IsolatedHome {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let previous = std::env::var_os("CC_SWITCH_TEST_HOME");
+            std::env::set_var("CC_SWITCH_TEST_HOME", dir.path());
+            crate::settings::reload_settings().unwrap();
+            Self {
+                _dir: dir,
+                previous,
+            }
+        }
+    }
+
+    impl Drop for IsolatedHome {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => std::env::set_var("CC_SWITCH_TEST_HOME", previous),
+                None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+            }
+            crate::settings::reload_settings().unwrap();
+        }
+    }
+
+    fn test_state() -> AppState {
+        AppState::new(Arc::new(crate::database::Database::memory().unwrap()))
+    }
+
+    fn company_caps(window: u64) -> Value {
+        json!({
+            "supported_reasoning_levels": [{"effort": "high", "description": "High"}, {"effort": "ultra", "description": "Ultra"}],
+            "default_reasoning_level": "high",
+            "additional_speed_tiers": ["fast"],
+            "service_tiers": [{"id": "priority", "name": "Priority", "description": "Priority tier"}],
+            "context_window": window
+        })
+    }
+
+    #[test]
+    fn company_protocol_is_retained_for_codex_proxy_translation() {
+        let mut entry = sample_entry();
+        entry.protocol = "openai-chat".into();
+        let (_, provider) = company_catalog_provider(&entry, &sample_login(), 1).unwrap();
+        assert_eq!(
+            provider.meta.unwrap().api_format.as_deref(),
+            Some("openai_chat")
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn normalization_preserves_declared_company_chat_protocol() {
+        let _home = IsolatedHome::new();
+        let state = test_state();
+        let mut entry = sample_entry();
+        entry.protocol = "openai-chat".into();
+        let (_, provider) = company_catalog_provider(&entry, &sample_login(), 1).unwrap();
+        state.db.save_provider("codex", &provider).unwrap();
+        normalize_company_codex_providers(&state).unwrap();
+        let normalized = state
+            .db
+            .get_provider_by_id(&provider.id, "codex")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            normalized.meta.unwrap().api_format.as_deref(),
+            Some("openai_chat")
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn first_catalog_sync_preserves_external_cli_and_personal_oauth() {
+        let _home = IsolatedHome::new();
+        let state = test_state();
+        let auth_path = crate::codex_config::get_codex_auth_path();
+        let config_path = crate::codex_config::get_codex_config_path();
+        std::fs::create_dir_all(auth_path.parent().unwrap()).unwrap();
+        let oauth =
+            br#"{"tokens":{"access_token":"fixture-personal-oauth"},"OPENAI_API_KEY":null}"#;
+        let config = "model = \"personal-model\"\n";
+        std::fs::write(&auth_path, oauth).unwrap();
+        std::fs::write(&config_path, config).unwrap();
+        sync_company_providers(&state, &sample_login()).unwrap();
+        assert_eq!(std::fs::read(&auth_path).unwrap(), oauth);
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), config);
+        assert!(ProviderService::current(&state, AppType::Codex)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn company_sync_rejects_personal_card_id_collision() {
+        let _home = IsolatedHome::new();
+        let state = test_state();
+        let (_, mut personal) =
+            company_catalog_provider(&sample_entry(), &sample_login(), 1).unwrap();
+        personal.meta = None;
+        personal.name = "Personal".into();
+        personal.settings_config["auth"]["OPENAI_API_KEY"] = json!("personal-key");
+        state.db.save_provider("codex", &personal).unwrap();
+        assert!(sync_company_providers(&state, &sample_login()).is_err());
+        assert_eq!(
+            state
+                .db
+                .get_provider_by_id(&personal.id, "codex")
+                .unwrap()
+                .unwrap()
+                .settings_config,
+            personal.settings_config
+        );
+        assert_eq!(normalize_company_codex_providers(&state).unwrap(), 0);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn stale_catalog_keeps_company_current_and_personal_cards() {
+        let _home = IsolatedHome::new();
+        let state = test_state();
+        let (_, company) = company_catalog_provider(&sample_entry(), &sample_login(), 1).unwrap();
+        state.db.save_provider("codex", &company).unwrap();
+        state.db.set_current_provider("codex", &company.id).unwrap();
+        let personal = Provider::with_id(
+            "personal".into(),
+            "Personal".into(),
+            json!({"auth": {"OPENAI_API_KEY": "personal-key"}}),
+            None,
+        );
+        state.db.save_provider("codex", &personal).unwrap();
+        let login = LoginResponse {
+            catalog: vec![],
+            ..sample_login()
+        };
+        sync_company_providers(&state, &login).unwrap();
+        let stale = state
+            .db
+            .get_provider_by_id(&company.id, "codex")
+            .unwrap()
+            .unwrap();
+        assert_eq!(stale.settings_config, company.settings_config);
+        assert!(stale.notes.unwrap().contains("已从公司目录移除"));
+        assert_eq!(
+            state
+                .db
+                .get_provider_by_id("personal", "codex")
+                .unwrap()
+                .unwrap()
+                .settings_config,
+            personal.settings_config
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn capability_only_sync_regenerates_live_catalog_without_touching_personal_card() {
+        let _home = IsolatedHome::new();
+        let state = test_state();
+        let mut login = sample_login();
+        login.catalog[0].model_capabilities = Some(std::collections::BTreeMap::from([(
+            "gpt-5.5".into(),
+            company_caps(272000),
+        )]));
+        let (_, company) = company_catalog_provider(&login.catalog[0], &login, 1).unwrap();
+        let mut personal = Provider::with_id(
+            "personal".into(),
+            "Personal".into(),
+            json!({"auth": {"tokens": {"access_token": "fixture-personal-oauth"}}, "config": "model = \"personal-model\"\n"}),
+            None,
+        );
+        personal.category = Some("official".into());
+        state.db.save_provider("codex", &personal).unwrap();
+        sync_company_providers(&state, &login).unwrap();
+        ProviderService::switch(&state, AppType::Codex, &company.id).unwrap();
+        let catalog_path = crate::codex_config::get_codex_model_catalog_path();
+        let before: Value = serde_json::from_slice(&std::fs::read(&catalog_path).unwrap()).unwrap();
+        assert_eq!(before["models"][0]["context_window"], 272000);
+        login.catalog[0].model_capabilities = Some(std::collections::BTreeMap::from([(
+            "gpt-5.5".into(),
+            company_caps(400000),
+        )]));
+        login.api_key = "rotated-company-key".into();
+        sync_company_providers(&state, &login).unwrap();
+        let after: Value = serde_json::from_slice(&std::fs::read(&catalog_path).unwrap()).unwrap();
+        assert_eq!(after["models"][0]["context_window"], 400000);
+        assert_eq!(after["models"][0]["default_reasoning_level"], "high");
+        assert_eq!(
+            after["models"][0]["additional_speed_tiers"],
+            json!(["fast"])
+        );
+        assert_eq!(
+            after["models"][0]["service_tiers"],
+            company_caps(400000)["service_tiers"]
+        );
+        assert_eq!(
+            after["models"][0]["supported_reasoning_levels"],
+            company_caps(400000)["supported_reasoning_levels"]
+        );
+        assert_eq!(
+            state
+                .db
+                .get_provider_by_id(&company.id, "codex")
+                .unwrap()
+                .unwrap()
+                .settings_config["auth"]["OPENAI_API_KEY"],
+            "rotated-company-key"
+        );
+        assert_eq!(
+            state
+                .db
+                .get_provider_by_id("personal", "codex")
+                .unwrap()
+                .unwrap()
+                .settings_config,
+            personal.settings_config
+        );
+        ProviderService::switch(&state, AppType::Codex, "personal").unwrap();
+        let auth: Value = serde_json::from_slice(
+            &std::fs::read(crate::codex_config::get_codex_auth_path()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(auth["tokens"]["access_token"], "fixture-personal-oauth");
     }
 
     #[test]

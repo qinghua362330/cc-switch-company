@@ -2,7 +2,7 @@ import {
   type FormEvent,
   type ReactNode,
   useEffect,
-  useMemo,
+  useRef,
   useState,
 } from "react";
 import { useQueryClient } from "@tanstack/react-query";
@@ -21,6 +21,7 @@ import {
   toCompanyAuthError,
   type CompanyAuthState,
 } from "@/lib/api/companyAuth";
+import { COMPANY_AUTH_LOGIN_EVENT } from "@/components/auth/companyCatalogEvents";
 import { showCompanyCatalogUpdatedDialog } from "@/lib/userAttention";
 
 interface CompanyAuthGateProps {
@@ -58,131 +59,170 @@ export function CompanyAuthGate({ children }: CompanyAuthGateProps) {
     readGuideAcknowledged,
   );
 
-  const syncCompanyProviderCards = async (nextState: CompanyAuthState) => {
-    if (!nextState.authenticated) return;
+  const stateRef = useRef<CompanyAuthState | null>(null);
+  const pendingSyncRef = useRef(true);
+  const queueRef = useRef<Promise<void>>(Promise.resolve());
+  const generationRef = useRef(0);
 
-    try {
-      await syncCompanyProviders();
-      await queryClient.invalidateQueries({ queryKey: ["providers"] });
-      await providersApi.updateTrayMenu();
-    } catch (syncError) {
-      console.warn("[CompanyAuth] Failed to sync company providers", syncError);
+  // Include sync in the transaction: the Rust sync command reads the stored catalog.
+  // An intervening refresh must not change that catalog before sync completes.
+  const enqueue = (operation: () => Promise<void>): Promise<void> => {
+    const result = queueRef.current.then(operation);
+    queueRef.current = result.catch(() => {});
+    return result;
+  };
+  const isCurrent = (generation: number) =>
+    generationRef.current === generation;
+  const ensureCurrent = (generation: number) => {
+    if (!isCurrent(generation))
+      throw new Error("Company authentication changed");
+  };
+  const publishState = (nextState: CompanyAuthState) => {
+    stateRef.current = nextState;
+    setState(nextState);
+  };
+  const syncCompanyProviderCards = async (generation: number) => {
+    ensureCurrent(generation);
+    await syncCompanyProviders();
+    ensureCurrent(generation);
+    await queryClient.invalidateQueries({ queryKey: ["providers"] });
+    ensureCurrent(generation);
+    await providersApi.updateTrayMenu();
+    ensureCurrent(generation);
+    pendingSyncRef.current = false;
+  };
+  const handleAuthError = async (cause: unknown, generation: number) => {
+    if (!isCurrent(generation)) return;
+    const authError = toCompanyAuthError(cause);
+    setError(authError.message);
+    if (
+      authError.kind === "session_expired" ||
+      authError.kind === "invalid_ticket"
+    ) {
+      // Close the gate even if credential cleanup fails. Never clear user configs.
+      generationRef.current += 1;
+      publishState({ authenticated: false });
+      pendingSyncRef.current = true;
+      setTicket("");
+      await logoutCompanyAuth().catch(() => {});
     }
   };
 
-  // 每天 10:00 拉取线上目录，仅在内容变化时重建 providers 并提示重启。
-  const refreshCompanyCatalogDaily = async () => {
-    if (!state?.authenticated) return;
-
-    const refreshed = await refreshCompanyCatalog();
-    const nextState: CompanyAuthState = {
-      authenticated: true,
-      user: state.user,
-      catalog: refreshed.catalog,
-      baseUrl: refreshed.baseUrl ?? state.baseUrl,
-    };
-    const hasChanged =
-      nextState.baseUrl !== state.baseUrl ||
-      JSON.stringify(nextState.catalog) !== JSON.stringify(state.catalog);
-
-    if (!hasChanged) return;
-
-    setState(nextState);
-    await syncCompanyProviderCards(nextState);
-    await showCompanyCatalogUpdatedDialog();
+  // 每天 10:00 拉取线上目录；仅在同步成功后确认 metadata，失败可重试。
+  const refreshCatalog = (daily: boolean): Promise<void> => {
+    const generation = generationRef.current;
+    return enqueue(async () => {
+      ensureCurrent(generation);
+      const previous = stateRef.current;
+      if (!previous?.authenticated)
+        throw new Error("Company authentication changed");
+      try {
+        const refreshed = await refreshCompanyCatalog();
+        ensureCurrent(generation);
+        const nextState: CompanyAuthState = {
+          authenticated: true,
+          user: previous.user,
+          catalog: refreshed.catalog,
+          baseUrl: refreshed.baseUrl ?? previous.baseUrl,
+        };
+        const hasChanged =
+          nextState.baseUrl !== previous.baseUrl ||
+          JSON.stringify(nextState.catalog) !==
+            JSON.stringify(previous.catalog);
+        if (!daily || hasChanged || pendingSyncRef.current) {
+          pendingSyncRef.current = true;
+          await syncCompanyProviderCards(generation);
+        }
+        ensureCurrent(generation);
+        publishState(nextState);
+        // A queued retry must not hide the preceding failure before it succeeds.
+        setError(null);
+        if (daily && hasChanged) await showCompanyCatalogUpdatedDialog();
+        ensureCurrent(generation);
+      } catch (cause) {
+        await handleAuthError(cause, generation);
+        throw cause; // Poll only records today after the entire transaction succeeds.
+      }
+    });
   };
 
   useCompanyCatalogPoll({
     enabled: state?.authenticated === true,
-    onDailyRefresh: refreshCompanyCatalogDaily,
+    onDailyRefresh: () => refreshCatalog(true),
   });
 
   useEffect(() => {
-    let active = true;
-
-    const load = async () => {
+    const generation = generationRef.current;
+    void enqueue(async () => {
+      if (!isCurrent(generation)) return;
       setIsLoadingState(true);
       try {
         const nextState = await getCompanyAuthState();
-        if (active) {
-          setState(nextState);
-          setError(null);
-          void syncCompanyProviderCards(nextState);
+        ensureCurrent(generation);
+        publishState(nextState);
+        setError(null);
+        if (nextState.authenticated) {
+          pendingSyncRef.current = true;
+          await syncCompanyProviderCards(generation);
         }
-      } catch (loadError) {
-        if (active) {
-          setState({ authenticated: false });
-          setError(toCompanyAuthError(loadError).message);
+      } catch (cause) {
+        await handleAuthError(cause, generation);
+        if (isCurrent(generation) && stateRef.current === null) {
+          publishState({ authenticated: false });
         }
       } finally {
-        if (active) setIsLoadingState(false);
+        setIsLoadingState(false);
       }
-    };
-
-    void load();
+    });
     return () => {
-      active = false;
+      generationRef.current += 1;
     };
   }, []);
 
-  const shell = useMemo(() => {
-    if (!state?.authenticated) return null;
+  const refresh = async () => {
+    setIsRefreshing(true);
+    try {
+      await refreshCatalog(false);
+    } catch {
+      /* refreshCatalog reports a sanitized error. */
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
 
-    const refresh = async () => {
-      setIsRefreshing(true);
-      setError(null);
-      try {
-        const refreshed = await refreshCompanyCatalog();
-        setState({
-          authenticated: true,
-          user: state.user,
-          catalog: refreshed.catalog,
-          baseUrl: refreshed.baseUrl ?? state.baseUrl,
-        });
-        void syncCompanyProviderCards({
-          authenticated: true,
-          user: state.user,
-          catalog: refreshed.catalog,
-          baseUrl: refreshed.baseUrl ?? state.baseUrl,
-        });
-      } catch (refreshError) {
-        const authError = toCompanyAuthError(refreshError);
-        if (authError.kind === "invalid_ticket") {
-          await logoutCompanyAuth();
-          setState({ authenticated: false });
-          setTicket("");
-        }
-        setError(authError.message);
-      } finally {
-        setIsRefreshing(false);
-      }
-    };
-
-    const logout = async () => {
-      setIsLoggingOut(true);
-      setError(null);
+  const logout = async () => {
+    const previous = stateRef.current;
+    const generation = ++generationRef.current;
+    setIsLoggingOut(true);
+    setError(null);
+    publishState({ authenticated: false });
+    pendingSyncRef.current = true;
+    setTicket("");
+    // Always run cleanup, even if a new login was queued while logout waited.
+    await enqueue(async () => {
       try {
         await logoutCompanyAuth();
-        setState({ authenticated: false });
-        setTicket("");
       } catch {
-        setError("退出登录失败，请稍后重试。");
+        if (isCurrent(generation)) {
+          if (previous) publishState(previous);
+          setError("退出登录失败，请稍后重试。");
+        }
       } finally {
         setIsLoggingOut(false);
       }
-    };
+    });
+  };
 
-    return (
-      <CompanyAuthShell
-        state={state}
-        error={error}
-        isRefreshing={isRefreshing}
-        isLoggingOut={isLoggingOut}
-        onRefresh={() => void refresh()}
-        onLogout={() => void logout()}
-      />
-    );
-  }, [error, isLoggingOut, isRefreshing, state]);
+  const shell = state?.authenticated ? (
+    <CompanyAuthShell
+      state={state}
+      error={error}
+      isRefreshing={isRefreshing}
+      isLoggingOut={isLoggingOut}
+      onRefresh={() => void refresh()}
+      onLogout={() => void logout()}
+    />
+  ) : null;
 
   const openFeishu = async () => {
     setError(null);
@@ -196,19 +236,27 @@ export function CompanyAuthGate({ children }: CompanyAuthGateProps) {
 
   const submitTicket = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    const generation = ++generationRef.current;
+    const submittedTicket = ticket;
     setError(null);
     setIsLoggingIn(true);
-    try {
-      const nextState = await loginWithCompanyTicket(ticket);
-      setState(nextState);
-      void syncCompanyProviderCards(nextState);
-      setTicket("");
-    } catch (loginError) {
-      setState({ authenticated: false });
-      setError(toCompanyAuthError(loginError).message);
-    } finally {
-      setIsLoggingIn(false);
-    }
+    await enqueue(async () => {
+      if (!isCurrent(generation)) return;
+      try {
+        const nextState = await loginWithCompanyTicket(submittedTicket);
+        ensureCurrent(generation);
+        publishState(nextState);
+        pendingSyncRef.current = true;
+        setTicket("");
+        // No credential data crosses this event boundary.
+        window.dispatchEvent(new Event(COMPANY_AUTH_LOGIN_EVENT));
+        await syncCompanyProviderCards(generation);
+      } catch (cause) {
+        await handleAuthError(cause, generation);
+      } finally {
+        setIsLoggingIn(false);
+      }
+    });
   };
 
   if (isLoadingState || state === null) {

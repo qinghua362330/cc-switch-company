@@ -67,39 +67,84 @@ impl SecretStore for FileSecretStore {
         std::fs::create_dir_all(&self.base_dir)
             .map_err(|_| AuthError::new("storage", "创建公司认证密钥目录失败"))?;
         let path = self.secrets_path();
-        let tmp_path = path.with_extension("json.tmp");
-        let raw = serde_json::to_vec_pretty(secrets)
-            .map_err(|_| AuthError::new("storage", "序列化公司认证密钥失败"))?;
-        std::fs::write(&tmp_path, raw)
-            .map_err(|_| AuthError::new("storage", "写入公司认证密钥失败"))?;
-        set_owner_only_permissions(&tmp_path)?;
-        std::fs::rename(&tmp_path, &path)
-            .map_err(|_| AuthError::new("storage", "保存公司认证密钥失败"))?;
-        set_owner_only_permissions(&path)?;
-        Ok(())
+        let tmp_path = path.with_extension(format!("json.tmp.{}", uuid::Uuid::new_v4()));
+        let result = (|| {
+            let raw = serde_json::to_vec_pretty(secrets)
+                .map_err(|_| AuthError::new("storage", "序列化公司认证密钥失败"))?;
+            let mut file = create_secret_temp_file(&tmp_path)?;
+            use std::io::Write;
+            file.write_all(&raw)
+                .and_then(|_| file.sync_all())
+                .map_err(|_| AuthError::new("storage", "写入公司认证密钥失败"))?;
+            drop(file);
+            std::fs::rename(&tmp_path, &path)
+                .map_err(|_| AuthError::new("storage", "保存公司认证密钥失败"))
+        })();
+        if result.is_err() {
+            remove_secret_file(&tmp_path)?;
+        }
+        result
     }
 
     fn clear_secrets(&self) -> Result<(), AuthError> {
-        let path = self.secrets_path();
-        match std::fs::remove_file(path) {
-            Ok(()) => Ok(()),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(_) => Err(AuthError::new("storage", "清除公司认证密钥失败")),
+        // Attempt temporary cleanup even if the primary file cannot be removed.
+        let mut result = remove_secret_file(&self.secrets_path());
+        match std::fs::read_dir(&self.base_dir) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = match entry {
+                        Ok(entry) => entry,
+                        Err(_) => {
+                            if result.is_ok() {
+                                result = Err(AuthError::new("storage", "读取公司认证密钥目录失败"));
+                            }
+                            continue;
+                        }
+                    };
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    if name == format!("{SECRETS_FILE_NAME}.tmp")
+                        || name
+                            .strip_prefix(&format!("{SECRETS_FILE_NAME}.tmp."))
+                            .is_some_and(|suffix| uuid::Uuid::parse_str(suffix).is_ok())
+                    {
+                        let cleanup = remove_secret_file(&entry.path());
+                        if result.is_ok() {
+                            result = cleanup;
+                        }
+                    }
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {
+                if result.is_ok() {
+                    result = Err(AuthError::new("storage", "读取公司认证密钥目录失败"));
+                }
+            }
         }
+        result
     }
 }
 
-#[cfg(unix)]
-fn set_owner_only_permissions(path: &std::path::Path) -> Result<(), AuthError> {
-    use std::os::unix::fs::PermissionsExt;
-
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        .map_err(|_| AuthError::new("storage", "设置公司认证密钥权限失败"))
+fn create_secret_temp_file(path: &std::path::Path) -> Result<std::fs::File, AuthError> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+        .open(path)
+        .map_err(|_| AuthError::new("storage", "创建公司认证密钥临时文件失败"))
 }
 
-#[cfg(not(unix))]
-fn set_owner_only_permissions(_path: &std::path::Path) -> Result<(), AuthError> {
-    Ok(())
+fn remove_secret_file(path: &std::path::Path) -> Result<(), AuthError> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(AuthError::new("storage", "清除公司认证密钥失败")),
+    }
 }
 
 #[derive(Clone, Default)]
@@ -142,6 +187,77 @@ mod tests {
 
         store.clear_secrets().unwrap();
         assert_eq!(store.load_secrets().unwrap(), None);
+    }
+
+    #[test]
+    fn file_secret_store_clear_removes_abandoned_temporary_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileSecretStore::new(dir.path().to_path_buf());
+        let tmp = store.secrets_path().with_extension("json.tmp");
+        std::fs::write(&tmp, b"abandoned secret").unwrap();
+        store.clear_secrets().unwrap();
+        assert!(!tmp.exists());
+    }
+
+    #[test]
+    fn file_secret_store_failed_replace_cleans_temporary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileSecretStore::new(dir.path().to_path_buf());
+        std::fs::create_dir(store.secrets_path()).unwrap();
+        assert!(store.save_secrets(&sample_secrets()).is_err());
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| {
+                name.to_string_lossy()
+                    .starts_with("company_auth_secrets.json.tmp")
+            })
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temporary secrets remain: {leftovers:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_secret_store_does_not_follow_temporary_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileSecretStore::new(dir.path().to_path_buf());
+        let unrelated = dir.path().join("unrelated");
+        std::fs::write(&unrelated, b"keep me").unwrap();
+        std::os::unix::fs::symlink(&unrelated, store.secrets_path().with_extension("json.tmp"))
+            .unwrap();
+        let _ = store.save_secrets(&sample_secrets());
+        assert_eq!(std::fs::read(&unrelated).unwrap(), b"keep me");
+    }
+
+    #[test]
+    fn file_secret_store_clear_cleans_all_temps_even_if_primary_removal_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileSecretStore::new(dir.path().to_path_buf());
+        std::fs::create_dir(store.secrets_path()).unwrap();
+        let legacy = store.secrets_path().with_extension("json.tmp");
+        let unique = store
+            .secrets_path()
+            .with_extension(format!("json.tmp.{}", uuid::Uuid::new_v4()));
+        std::fs::write(&legacy, b"legacy secret").unwrap();
+        std::fs::write(&unique, b"unique secret").unwrap();
+        assert!(store.clear_secrets().is_err());
+        assert!(!legacy.exists());
+        assert!(!unique.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secret_temp_is_owner_only_before_any_secret_is_written() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("new-secret.tmp");
+        let file = create_secret_temp_file(&path).unwrap();
+        assert_eq!(file.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(file.metadata().unwrap().len(), 0);
+        assert!(create_secret_temp_file(&path).is_err());
     }
 
     #[cfg(unix)]

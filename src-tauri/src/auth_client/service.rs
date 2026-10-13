@@ -1,4 +1,7 @@
 use std::path::Path;
+use std::sync::Arc;
+
+use tokio::sync::Mutex;
 
 use super::client::{
     legacy_default_catalog, ProvisionClient, ProvisionConfig, ReqwestProvisionClient,
@@ -18,6 +21,8 @@ where
 {
     client: C,
     persistence: AuthPersistence<M, S>,
+    // Shared by clones, so direct service callers also serialize session mutations.
+    session_lock: Arc<Mutex<()>>,
 }
 
 impl<C, M, S> AuthService<C, M, S>
@@ -30,10 +35,12 @@ where
         Self {
             client,
             persistence,
+            session_lock: Arc::new(Mutex::new(())),
         }
     }
 
     pub async fn get_state(&self) -> Result<AuthState, AuthError> {
+        let _session_guard = self.session_lock.lock().await;
         let mut state = self.persistence.load_state()?;
         if state.authenticated {
             if let Ok(secrets) = self.persistence.load_secrets() {
@@ -47,6 +54,7 @@ where
     }
 
     pub async fn current_login(&self) -> Result<LoginResponse, AuthError> {
+        let _session_guard = self.session_lock.lock().await;
         let metadata = self
             .persistence
             .load_metadata()?
@@ -68,6 +76,7 @@ where
     }
 
     pub async fn login_with_ticket(&self, ticket: &str) -> Result<AuthState, AuthError> {
+        let _session_guard = self.session_lock.lock().await;
         let ticket = ticket.trim();
         if !ticket.starts_with("fs_") || ticket.len() <= 3 {
             return Err(AuthError::invalid_ticket());
@@ -85,6 +94,7 @@ where
     }
 
     pub async fn refresh_catalog(&self) -> Result<AuthState, AuthError> {
+        let _session_guard = self.session_lock.lock().await;
         let secrets = self.persistence.load_secrets()?;
         match self.client.catalog(&secrets.session_token).await {
             Ok((base_url, catalog)) => {
@@ -101,11 +111,13 @@ where
     }
 
     pub async fn catalog_version(&self) -> Result<String, AuthError> {
+        let _session_guard = self.session_lock.lock().await;
         let secrets = self.persistence.load_secrets()?;
         self.client.catalog_version(&secrets.session_token).await
     }
 
     pub async fn logout(&self) -> Result<AuthState, AuthError> {
+        let _session_guard = self.session_lock.lock().await;
         self.persistence.clear()?;
         Ok(AuthState::unauthenticated())
     }

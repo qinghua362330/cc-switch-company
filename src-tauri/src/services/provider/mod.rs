@@ -2334,11 +2334,24 @@ requires_openai_auth = true
                 .expect("update app proxy config");
         }
 
+        db.update_proxy_config(ProxyConfig {
+            listen_port: 0,
+            ..Default::default()
+        })
+        .await
+        .expect("use an isolated proxy port");
+
         state
             .proxy_service
             .start()
             .await
             .expect("start proxy service");
+        let proxy_url = state
+            .proxy_service
+            .build_proxy_urls()
+            .await
+            .expect("get bound proxy URL")
+            .0;
 
         let mut updated = Provider::with_id(
             "p1".into(),
@@ -2382,7 +2395,7 @@ requires_openai_auth = true
         let profile: Value = read_json_file(&profile_path).expect("read desktop profile");
         assert_eq!(
             profile["inferenceGatewayBaseUrl"],
-            json!("http://127.0.0.1:15721/claude-desktop"),
+            json!(format!("{proxy_url}/claude-desktop")),
             "desktop profile should stay pointed at the local gateway during takeover"
         );
         assert_eq!(profile["inferenceGatewayAuthScheme"], json!("bearer"));
@@ -2391,6 +2404,11 @@ requires_openai_auth = true
             json!([{ "name": "claude-sonnet-4-6", "labelOverride": "DeepSeek V4 Flash Updated", "supports1m": true }]),
             "provider edits should propagate into the Claude Desktop 3P profile during takeover"
         );
+        state
+            .proxy_service
+            .stop()
+            .await
+            .expect("stop isolated proxy service");
     }
 
     #[test]

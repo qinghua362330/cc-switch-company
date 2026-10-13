@@ -105,6 +105,10 @@ const syncMockCompanyProviders = () => {
     const defaultModel =
       Object.getOwnPropertyDescriptor(item, "default_model")?.value ??
       Object.getOwnPropertyDescriptor(item, "defaultModel")?.value;
+    const models = Object.getOwnPropertyDescriptor(item, "models")?.value;
+    const capabilities =
+      Object.getOwnPropertyDescriptor(item, "model_capabilities")?.value ??
+      Object.getOwnPropertyDescriptor(item, "modelCapabilities")?.value;
     if (typeof label !== "string") continue;
     const app =
       tool === "codex"
@@ -127,6 +131,17 @@ const syncMockCompanyProviders = () => {
                 OPENAI_API_KEY: "sk-test-secret-should-not-render",
               },
               config: `model_provider = "custom"\nmodel = "${defaultModel}"\n\n[model_providers.custom]\nname = "${label}"\nbase_url = "${baseUrl.replace(/\/$/, "")}/v1"\nwire_api = "responses"\nrequires_openai_auth = true\n`,
+              modelCatalog: {
+                models: Array.isArray(models)
+                  ? models.map((model) => ({
+                      model,
+                      displayName: model,
+                      ...(capabilities?.[model]
+                        ? { capabilities: capabilities[model] }
+                        : {}),
+                    }))
+                  : [],
+              },
             }
           : app === "gemini"
             ? {
@@ -195,9 +210,7 @@ export const companyAuthHandlers = [
         },
         base_url: "https://leharrt.com",
         session_token: "test_session_token_should_not_render",
-        api_key: ["fixture", "api", "key", "should", "not", "render"].join(
-          "-",
-        ),
+        api_key: ["fixture", "api", "key", "should", "not", "render"].join("-"),
         catalog: [
           {
             tool: "codex",
@@ -245,8 +258,8 @@ export const companyAuthHandlers = [
       return success(nextState);
     },
   ),
-  http.post(`${TAURI_ENDPOINT}/company_auth_refresh_catalog`, () =>
-    success({
+  http.post(`${TAURI_ENDPOINT}/company_auth_refresh_catalog`, () => {
+    const refreshed = {
       base_url: "https://leharrt.com",
       catalog: [
         {
@@ -258,8 +271,13 @@ export const companyAuthHandlers = [
           group: "default",
         },
       ],
-    }),
-  ),
+    };
+    const state = getCompanyAuthState();
+    if (state && typeof state === "object" && !Array.isArray(state)) {
+      setCompanyAuthState({ ...state, ...refreshed });
+    }
+    return success(refreshed);
+  }),
   http.post(`${TAURI_ENDPOINT}/company_auth_sync_providers`, () =>
     success({ synced: syncMockCompanyProviders() }),
   ),

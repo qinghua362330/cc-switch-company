@@ -187,7 +187,10 @@ const getCompanyCatalogApp = (tool: string | undefined): AppId | null => {
 };
 
 const getLogicalWidth = (
-  size: { width: number; toLogical?: (scaleFactor: number) => { width: number } },
+  size: {
+    width: number;
+    toLogical?: (scaleFactor: number) => { width: number };
+  },
   scaleFactor: number,
 ): number => {
   if (typeof size.toLogical === "function") {
@@ -197,7 +200,10 @@ const getLogicalWidth = (
 };
 
 const getLogicalHeight = (
-  size: { height: number; toLogical?: (scaleFactor: number) => { height: number } },
+  size: {
+    height: number;
+    toLogical?: (scaleFactor: number) => { height: number };
+  },
   scaleFactor: number,
 ): number => {
   if (typeof size.toLogical === "function") {

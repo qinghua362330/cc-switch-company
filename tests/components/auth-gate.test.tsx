@@ -13,11 +13,17 @@ import {
   setCompanyAuthState,
 } from "../msw/state";
 import { COMPANY_CATALOG_SELECT_EVENT } from "@/components/auth/companyCatalogEvents";
+import App from "@/App";
 
 const TAURI_ENDPOINT = "http://tauri.local";
 const GUIDE_ACK_STORAGE_KEY = "token-switch-company-auth-guide-ack-v1";
 
 vi.setConfig({ testTimeout: 10000 });
+
+vi.mock("@/lib/userAttention", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/userAttention")>()),
+  showCompanyCatalogUpdatedDialog: vi.fn().mockResolvedValue(undefined),
+}));
 
 vi.mock("@/components/providers/ProviderList", () => ({
   ProviderList: ({ appId }: { appId: string }) => (
@@ -36,7 +42,6 @@ vi.mock("@/components/UpdateBadge", () => ({
 }));
 
 const renderApp = async () => {
-  const { default: App } = await import("@/App");
   const client = new QueryClient({
     defaultOptions: {
       queries: {
@@ -256,9 +261,9 @@ describe("company auth gate", () => {
         name: "登录成功，开始使用 CC Switch",
       }),
     ).toBeInTheDocument();
-    expect(screen.getAllByText("1. 点击顶部 Codex 图标").length).toBeGreaterThan(
-      0,
-    );
+    expect(
+      screen.getAllByText("1. 点击顶部 Codex 图标").length,
+    ).toBeGreaterThan(0);
     expect(screen.getByText("2. 选择公司号池 Codex")).toBeInTheDocument();
     expect(screen.getByText("3. 点击启用并确认使用中")).toBeInTheDocument();
     expect(

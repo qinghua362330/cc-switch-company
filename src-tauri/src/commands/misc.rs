@@ -371,6 +371,27 @@ async fn fetch_cc_switch_update_manifest(
         .map_err(|e| format!("解析更新清单失败: {e}"))
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn build_windows_update_installer_script(installer_url: &str) -> String {
+    format!(
+        r#"$ErrorActionPreference='Stop'
+$tmp=Join-Path ([IO.Path]::GetTempPath()) ('cc-switch-update-' + [Guid]::NewGuid().ToString('N') + '.ps1')
+$status=1
+try {{
+    Invoke-WebRequest -UseBasicParsing -Uri '{url}' -OutFile $tmp
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $tmp
+    $status=$LASTEXITCODE
+}} catch {{
+    Write-Error $_ -ErrorAction Continue
+    $status=1
+}} finally {{
+    Remove-Item -Force -ErrorAction SilentlyContinue $tmp
+}}
+exit $status"#,
+        url = installer_url.replace('\'', "''")
+    )
+}
+
 /// 打开终端执行 CC Switch 一键更新脚本。
 #[tauri::command]
 pub async fn launch_cc_switch_update_installer(
@@ -384,10 +405,7 @@ pub async fn launch_cc_switch_update_installer(
     #[cfg(target_os = "windows")]
     let command = format!(
         "powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand {}",
-        powershell_encoded_command(&format!(
-            "$ErrorActionPreference='Stop'; $tmp=[IO.Path]::GetTempFileName(); try {{ Invoke-WebRequest -UseBasicParsing -Uri '{}' -OutFile $tmp; & powershell -NoProfile -ExecutionPolicy Bypass -File $tmp; if ($LASTEXITCODE) {{ exit $LASTEXITCODE }} }} finally {{ Remove-Item -Force -ErrorAction SilentlyContinue $tmp }}",
-            installer_url.replace('`', "``").replace('\'', "''")
-        ))
+        powershell_encoded_command(&build_windows_update_installer_script(&installer_url))
     );
 
     #[cfg(not(target_os = "windows"))]
@@ -831,6 +849,7 @@ fn tool_display_name(tool: &str) -> &'static str {
         "claude" => "Claude Code",
         "codex" => "Codex",
         "gemini" => "Gemini CLI",
+        "grok" => "Grok Build",
         "opencode" => "OpenCode",
         "openclaw" => "OpenClaw",
         "hermes" => "Hermes",
@@ -1046,6 +1065,7 @@ fn npm_install_command_for(tool: &str) -> Option<&'static str> {
         ),
         "codex" => Some("npm i -g @openai/codex@latest"),
         "gemini" => Some("npm i -g @google/gemini-cli@latest"),
+        "grok" => Some("npm i -g @xai-official/grok@latest"),
         "opencode" => Some("npm i -g opencode-ai@latest"),
         "openclaw" => Some("npm i -g openclaw@latest"),
         "pi" => Some("npm i -g @earendil-works/pi-coding-agent@latest"),
@@ -1083,7 +1103,7 @@ fn npm_install_extra_args(tool: &str) -> &'static str {
 // `cmd.output()` 正是非 TTY，放进来会让 `mcode update || <fallback>` 的兜底永不触发。
 fn official_update_args(tool: &str) -> Option<&'static str> {
     match tool {
-        "claude" | "codex" | "hermes" => Some("update"),
+        "claude" | "codex" | "grok" | "hermes" => Some("update"),
         "openclaw" => Some("update --yes"),
         "opencode" => Some("upgrade"),
         _ => None,
@@ -1405,6 +1425,7 @@ async fn get_single_tool_version_impl(
         }
         "codex" => fetch_npm_latest_for_tool(&client, "@openai/codex", tool, local).await,
         "gemini" => fetch_npm_latest_for_tool(&client, "@google/gemini-cli", tool, local).await,
+        "grok" => fetch_npm_latest_for_tool(&client, "@xai-official/grok", tool, local).await,
         "opencode" => {
             if let Some(version) =
                 fetch_npm_latest_for_tool(&client, "opencode-ai", tool, local).await
@@ -2265,11 +2286,15 @@ fn mcode_extra_search_paths(
 fn tool_executable_candidates(tool: &str, dir: &Path) -> Vec<std::path::PathBuf> {
     #[cfg(target_os = "windows")]
     {
-        vec![
+        let extensionless = dir.join(tool);
+        let mut candidates = vec![
             dir.join(format!("{tool}.cmd")),
             dir.join(format!("{tool}.exe")),
-            dir.join(tool),
-        ]
+        ];
+        if windows_runnable_sibling_for_extensionless_tool(&extensionless).is_none() {
+            candidates.push(extensionless);
+        }
+        candidates
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -3214,6 +3239,7 @@ fn npm_package_for(tool: &str) -> Option<&'static str> {
         "claude" => Some("@anthropic-ai/claude-code"),
         "codex" => Some("@openai/codex"),
         "gemini" => Some("@google/gemini-cli"),
+        "grok" => Some("@xai-official/grok"),
         "opencode" => Some("opencode-ai"),
         "openclaw" => Some("openclaw"),
         "pi" => Some("@earendil-works/pi-coding-agent"),
@@ -3616,9 +3642,10 @@ fn prefers_official_update(tool: &str, shell: LifecycleCommandShell) -> bool {
 /// 二进制。唯一实测可靠的修复是先 `uninstall` 清掉残骸、再 `install` 装回完整的主包 + 平台二进制
 /// （实测输出 `added 2 packages`）。
 ///
-/// 锚定到与 codex 入口同目录的 npm（与升级路径一致，不依赖 GUI 非登录进程的 PATH）。`|| true`
-/// 让 uninstall 失败（如 nvm 上对半损坏包静默返回非 0）不触发外层 `set -e` 中止，但随后的
-/// install 若失败仍会被 `set -e` 捕获并上报给前端 toast。
+/// 锚定到与 codex 入口同目录的 npm，并把该目录放到每条 npm 命令的 PATH 首位，使 npm
+/// 的 `#!/usr/bin/env node` 能找到同一安装下的 node，不依赖 GUI 非登录进程的 PATH。
+/// `|| true` 让 uninstall 失败（如 nvm 上对半损坏包静默返回非 0）不触发外层 `set -e`
+/// 中止，但随后的 install 若失败仍会被 `set -e` 捕获并上报给前端 toast。
 ///
 /// **仅对会锚定到 sibling npm 的 node 管理器来源（nvm/fnm/mise/homebrew npm）生效**：
 /// `runnable=false` 是宽信号（权限 / node 版本 / 任意 `--version` 失败皆可触发），非 npm
@@ -3647,12 +3674,10 @@ fn codex_repair_command(bin_path: &str, real: &str) -> Option<String> {
     ) {
         return None;
     }
-    let npm = sibling_bin(bin_path, "npm")?;
-    let npm = quote_path_if_spaced(&npm);
     let pkg = "@openai/codex";
-    Some(format!(
-        "{npm} uninstall -g {pkg} || true; {npm} i -g {pkg}@latest"
-    ))
+    let uninstall = anchored_npm_command(bin_path, &format!("uninstall -g {pkg}"))?;
+    let install = anchored_npm_command(bin_path, &format!("i -g {pkg}@latest"))?;
+    Some(format!("{uninstall} || true; {install}"))
 }
 
 /// Windows 暂不做平台分发自愈：Windows 上 codex 的破坏模式不同（EPERM 文件锁 / 版本 bump
@@ -3713,7 +3738,8 @@ fn package_manager_anchored_command_from_paths(
 /// 便于单测覆盖各包管理器分支。Windows 版同名函数因 sibling 扩展名歧义必须读 fs,
 /// 是刻意保留的平台差异(详见 Windows 版本 doc)。
 ///
-/// **关键不变量：返回的命令必须用绝对路径调用执行体，不依赖 PATH**。
+/// **关键不变量：返回的命令必须用绝对路径调用执行体；若执行体通过
+/// `#!/usr/bin/env` 查找解释器，还必须把其同级 bin 目录显式放到 PATH 首位**。
 /// 这条命令最终在 `run_tool_lifecycle_silently` 的非登录 `bash -c` 里执行——
 /// GUI App 启动的进程 PATH 由 launchd / Windows Service / systemd 给,通常**不含**
 /// `~/.local/bin` / `/opt/homebrew/bin` / `~/.volta/bin` 等用户级 bin 目录;而探测
@@ -3725,7 +3751,7 @@ fn package_manager_anchored_command_from_paths(
 /// 判定顺序（命中即返回）：
 /// ① Hermes → `<bin_path 绝对> update`;Hermes CLI 自己知道安装环境,避免 cc-switch
 ///    猜系统 `python3`/`python` 时撞上 Python 版本或 pyenv shim 问题。
-/// ② Claude 原生安装器（`~/.local/share/claude/versions/`）→ `<bin_path 绝对> update`；
+/// ② Claude / Grok 原生安装器 → `<bin_path 绝对> update`；
 ///    bin_path 指向 launcher,launcher 内部 dispatch update 子命令。它不归 npm 管,
 ///    且在 PATH 里比 nvm/homebrew 更靠前,用 npm 升级会装到别处且被原生那份遮蔽。
 ///    MiniMax Code 的脚本安装同理不归全局 npm 管,但 `mcode update` 非 TTY 下不安装
@@ -3737,7 +3763,8 @@ fn package_manager_anchored_command_from_paths(
 ///    self-update 或 sibling npm 改动包管理器管理的安装。
 /// ④ 其余支持官方自升级的工具 → `<bin_path 绝对> update/upgrade || <原锚定包管理器命令>`；
 ///    Codex 的 self-update 只在部分 release 可用,所以保留 npm/brew/bun/volta fallback。
-/// ⑤ 不支持官方自升级的 npm 全局包(例如 Gemini CLI) → 锚定到"那处 bin 目录的 npm"。
+/// ⑤ 不支持官方自升级的 npm 全局包(例如 Gemini CLI，以及非 native 的 Grok Build) → 锚定到
+///    "那处 bin 目录的 npm"。
 #[cfg(not(target_os = "windows"))]
 fn anchored_command_from_paths(tool: &str, bin_path: &str, real_target: &str) -> Option<String> {
     let real_lower = real_target.to_ascii_lowercase();
@@ -3827,7 +3854,7 @@ fn package_manager_anchored_command_from_paths(tool: &str, bin_path: &str) -> Op
 
 /// Windows 版锚定命令生成。对平台确认可静默运行的工具优先使用官方 CLI 自升级；
 /// 对 npm/Volta/pnpm 这类可确认写回位置的安装，再接一个包管理器 fallback。不存在 brew/bun/claude-native
-/// (Windows 没 Homebrew、Bun for Windows 仍 preview、claude.ai/install.sh 是 bash 脚本)。
+/// (Windows 没 Homebrew、Bun for Windows 仍 preview；Grok native 使用 PowerShell installer)。
 /// Scoop/Chocolatey/winget/nvm-windows/MS Store node 都归 npm 类——它们都只是"如何装
 /// node"的不同入口,全局包真正的 idiom 仍是 sibling `npm.cmd`。
 ///
@@ -3836,9 +3863,8 @@ fn package_manager_anchored_command_from_paths(tool: &str, bin_path: &str) -> Op
 /// 装 `.cmd`、Volta 装 `.exe`,纯字符串拼接无法消歧。这一平台差异**被刻意保留**:
 /// 测试用 tempdir 隔离 fs,生产侧 TOCTOU 是 by design(见 `sibling_bin_with_ext` doc)。
 ///
-/// `_real_target` 占位维持与 POSIX 版的签名对称——Windows 上未观测到需要真身路径
-/// 区分的等价类(无 Cellar、无 claude-native installer)。若未来加 Scoop persist 锚定
-/// (scoop 装的工具真身在 `<scoop_root>/persist/<app>/...`),从这里启用 `_real_target`。
+/// `real_target` 维持与 POSIX 版的签名对称，并辅助识别 Grok native。若未来加 Scoop
+/// persist 锚定(scoop 装的工具真身在 `<scoop_root>/persist/<app>/...`),也从这里取真身。
 ///
 /// **关键不变量同 POSIX 版:返回的命令必须用绝对路径,不依赖 PATH**。Windows GUI
 /// 进程 PATH 由 Service Control Manager / explorer.exe 给,通常不含用户 `%LOCALAPPDATA%`
@@ -4502,7 +4528,7 @@ fn unmanaged_update_error(tool: &str, installs: &[ToolInstallation]) -> String {
 ///
 /// 设计理由:
 /// - install 没有锚点可言(从无到有),但**有"上游推荐方式"这一事实** ——
-///   Anthropic 和 SST(OpenCode)都已将自家 native installer 列为首推、把 npm 列为传统方式。
+///   Anthropic、xAI 和 SST(OpenCode)都已将自家 native installer 列为首推、把 npm 列为替代方式。
 ///   把这层认知补进来,让 install 表与 update 端的锚定决策树共用同一份"上游事实"。
 /// - Hermes 使用官方 installer,避免用系统 Python/pip 安装时踩 Python >=3.11 与 pyenv
 ///   `python` shim 问题;更新路径若能锚定已安装 CLI,则走 `<hermes> update`。
@@ -4660,6 +4686,7 @@ fn wsl_distro_for_tool(tool: &str) -> Option<String> {
         "claude" => crate::settings::get_claude_override_dir(),
         "codex" => crate::settings::get_codex_override_dir(),
         "gemini" => crate::settings::get_gemini_override_dir(),
+        "grok" => crate::settings::get_grok_override_dir(),
         "opencode" => crate::settings::get_opencode_override_dir(),
         "openclaw" => crate::settings::get_openclaw_override_dir(),
         "hermes" => crate::settings::get_hermes_override_dir(),
@@ -5407,19 +5434,21 @@ fn launch_windows_terminal(
         .map(|value| (WINDOWS_CWD_ENV, value))
         .into_iter()
         .collect();
+    // 这里以前写死 `claude --settings`，非 Claude 的应用（Codex/Gemini/Grok 等）点开会拉起
+    // 错的可执行文件。按应用算出该跑哪条命令，Claude 系再带上 settings 参数。
+    let provider_command = build_windows_provider_command(app_type, &config_path_for_batch);
 
     let content = format!(
         "@echo off
 {cwd_command}
 echo Using provider-specific claude config:
 echo \"{}\"
-claude --settings \"{}\"
+{provider_command}
 del \"{}\" >nul 2>&1
 del \"%~f0\" >nul 2>&1
 ",
         config_path_for_batch,
         config_path_for_batch,
-        provider_command = provider_command,
         cwd_command = cwd_command,
     );
 
@@ -5514,6 +5543,7 @@ fn build_windows_provider_command(app_type: &AppType, config_path_for_batch: &st
         AppType::OpenCode => "opencode".to_string(),
         AppType::OpenClaw => "openclaw".to_string(),
         AppType::Pi => "pi".to_string(),
+        AppType::Mcode => "mcode".to_string(),
     }
 }
 
@@ -5771,6 +5801,167 @@ pub async fn set_window_theme(window: tauri::Window, theme: String) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn company_windows_updater_uses_unique_ps1_and_cleans_up_failures() {
+        let script = build_windows_update_installer_script("https://example.test/install.ps1");
+        assert!(
+            script.contains("[Guid]::NewGuid()"),
+            "temporary installer must be unique: {script}"
+        );
+        assert!(
+            script.contains(".ps1"),
+            "PowerShell -File requires a .ps1 script: {script}"
+        );
+        assert!(
+            !script.contains("GetTempFileName"),
+            "do not leave a second .tmp file"
+        );
+        assert!(
+            script.contains("catch"),
+            "download errors must set a nonzero status"
+        );
+        assert!(script.contains("finally"));
+        assert!(script.contains("Remove-Item"));
+        assert!(script.contains("exit $status"));
+    }
+
+    #[test]
+    fn company_windows_updater_quotes_literal_download_url() {
+        let script = build_windows_update_installer_script("https://example.test/a'b`c.ps1");
+        // Backticks are literal within a PowerShell single-quoted string.
+        assert!(script.contains("-Uri 'https://example.test/a''b`c.ps1'"));
+    }
+
+    #[test]
+    fn company_update_manifest_keeps_token_only_on_trusted_endpoint() {
+        let client = reqwest::Client::new();
+        for (url, expected) in [
+            (
+                CC_SWITCH_ENTERPRISE_UPDATE_MANIFEST_URL,
+                Some("Bearer fixture-session"),
+            ),
+            ("https://example.test/update", None),
+            ("https://leharrt.com/api/client/update?other=1", None),
+        ] {
+            let request = build_update_manifest_request(&client, url, Some("fixture-session"))
+                .build()
+                .unwrap();
+            assert_eq!(
+                request
+                    .headers()
+                    .get(reqwest::header::AUTHORIZATION)
+                    .map(|value| value.to_str().unwrap()),
+                expected,
+            );
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn company_windows_updater_download_failure_and_installer_status_cleanup() {
+        for download_fails in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let quote = |value: &Path| value.to_string_lossy().replace('\'', "''");
+            let marker = temp.path().join("installer-ran");
+            let script = build_windows_update_installer_script("https://example.test/install.ps1")
+                .replace(
+                    "[IO.Path]::GetTempPath()",
+                    &format!("'{}'", quote(temp.path())),
+                );
+            let fail = if download_fails {
+                "throw 'fixture download failed'"
+            } else {
+                ""
+            };
+            let harness = format!(
+                r#"function Invoke-WebRequest {{
+    param([switch]$UseBasicParsing, [string]$Uri, [string]$OutFile)
+    [IO.File]::WriteAllText($OutFile, '# fixture partial download')
+    {fail}
+}}
+function powershell {{
+    $file = $args[-1]
+    if ([IO.Path]::GetExtension($file) -ne '.ps1') {{ throw 'invalid installer extension' }}
+    [IO.File]::WriteAllText('{marker}', $file)
+    $global:LASTEXITCODE = 23
+}}
+{script}"#,
+                marker = quote(&marker),
+            );
+            let output = Command::new("powershell")
+                .args([
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    &harness,
+                ])
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(if download_fails { 1 } else { 23 }),
+                "{}",
+                decode_command_output(&output.stderr)
+            );
+            assert_eq!(marker.exists(), !download_fails);
+            assert!(
+                std::fs::read_dir(temp.path()).unwrap().all(|entry| entry
+                    .unwrap()
+                    .path()
+                    .extension()
+                    .is_none_or(|extension| extension != "ps1")),
+                "partial installer must be cleaned up"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn company_codex_repair_supplies_node_for_both_npm_steps() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("home dir/.nvm/versions/node/v22/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let marker = temp.path().join("npm-calls");
+        let node = bin.join("node");
+        let npm = bin.join("npm");
+        std::fs::write(
+            &node,
+            format!(
+                "#!/bin/sh\necho \"$*\" >> {}\n",
+                shell_single_quote(&marker.to_string_lossy())
+            ),
+        )
+        .unwrap();
+        std::fs::write(&npm, "#!/usr/bin/env node\n").unwrap();
+        for executable in [&node, &npm] {
+            std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let command = codex_repair_command(
+            &bin.join("codex").to_string_lossy(),
+            &temp
+                .path()
+                .join("home dir/.nvm/versions/node/v22/lib/node_modules/@openai/codex/bin/codex.js")
+                .to_string_lossy(),
+        )
+        .unwrap();
+        let output = Command::new("/bin/bash")
+            .args(["-e", "-c", &command])
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            decode_command_output(&output.stderr)
+        );
+        let calls = std::fs::read_to_string(marker).unwrap();
+        assert_eq!(calls.lines().count(), 2);
+        assert!(calls.contains("uninstall -g @openai/codex"));
+        assert!(calls.contains("i -g @openai/codex@latest"));
+    }
 
     #[test]
     fn external_url_whitelist() {
@@ -6947,11 +7138,8 @@ mod tests {
             let (_dir, sub, bin_path) = setup_sibling("Volta", "codex.cmd", &["volta.exe"]);
             let cmd = anchored_command_from_paths("codex", &bin_path, &bin_path);
             let volta_full = format!("{}\\volta.exe", sub.to_string_lossy());
-            let expected = format!(
-                "{} update || call {} install @openai/codex",
-                expect_quoted_path(&bin_path),
-                expect_quoted_path(&volta_full)
-            );
+            // codex 自 5092fe51 起不在 prefers_official_update：直接锚定包管理器，无 `codex update ||` 前缀。
+            let expected = format!("{} install @openai/codex", expect_quoted_path(&volta_full));
             assert_eq!(cmd.as_deref(), Some(expected.as_str()));
         }
 
@@ -6963,9 +7151,9 @@ mod tests {
             let (_dir, sub, bin_path) = setup_sibling("pnpm", "codex.cmd", &["pnpm.cmd"]);
             let cmd = anchored_command_from_paths("codex", &bin_path, &bin_path);
             let pnpm_full = format!("{}\\pnpm.cmd", sub.to_string_lossy());
+            // codex 自 5092fe51 起不在 prefers_official_update：直接锚定包管理器，无 `codex update ||` 前缀。
             let expected = format!(
-                "{} update || call {} add -g @openai/codex@latest",
-                expect_quoted_path(&bin_path),
+                "{} add -g @openai/codex@latest",
                 expect_quoted_path(&pnpm_full)
             );
             assert_eq!(cmd.as_deref(), Some(expected.as_str()));
@@ -6997,9 +7185,9 @@ mod tests {
             let (_dir, sub, bin_path) = setup_sibling("v22.0.0", "codex.cmd", &["npm.cmd"]);
             let cmd = anchored_command_from_paths("codex", &bin_path, &bin_path);
             let npm_full = format!("{}\\npm.cmd", sub.to_string_lossy());
+            // codex 自 5092fe51 起不在 prefers_official_update：直接锚定包管理器，无 `codex update ||` 前缀。
             let expected = format!(
-                "{} update || call {} i -g @openai/codex@latest",
-                expect_quoted_path(&bin_path),
+                "{} i -g @openai/codex@latest",
                 expect_quoted_path(&npm_full)
             );
             assert_eq!(cmd.as_deref(), Some(expected.as_str()));
@@ -7135,10 +7323,11 @@ mod tests {
 
         #[test]
         fn windows_no_sibling_uses_cli_update_without_package_fallback() {
-            // sibling npm.cmd 不存在(纯独立二进制)时,仍可锚定到 CLI 自身跑官方 update。
-            // 只是没有包管理器 fallback。
-            let (_dir, _sub, bin_path) = setup_sibling("", "codex.cmd", &[]);
-            let cmd = anchored_command_from_paths("codex", &bin_path, &bin_path);
+            // sibling 包管理器不存在(纯独立二进制)时,仍可锚定到 CLI 自身跑官方 update。
+            // 只是没有包管理器 fallback。用 claude —— codex 自 5092fe51 起一律走 npm 锚定,
+            // 已不再有官方 self-update 分支,故改用仍在 prefers_official_update 的 claude 覆盖此路径。
+            let (_dir, _sub, bin_path) = setup_sibling("", "claude.cmd", &[]);
+            let cmd = anchored_command_from_paths("claude", &bin_path, &bin_path);
             let expected = format!("{} update", expect_quoted_path(&bin_path));
             assert_eq!(cmd.as_deref(), Some(expected.as_str()));
         }
@@ -7214,9 +7403,9 @@ mod tests {
             let (_dir, sub, bin_path) = setup_sibling("Program Files", "codex.cmd", &["npm.cmd"]);
             let cmd = anchored_command_from_paths("codex", &bin_path, &bin_path);
             let npm_full = format!("{}\\npm.cmd", sub.to_string_lossy());
+            // codex 走 npm 锚定(5092fe51),含空格的 npm 全路径仍必须被双引号包裹。
             let expected = format!(
-                "{} update || call {} i -g @openai/codex@latest",
-                expect_quoted_path(&bin_path),
+                "{} i -g @openai/codex@latest",
                 expect_quoted_path(&npm_full)
             );
             assert_eq!(cmd.as_deref(), Some(expected.as_str()));
@@ -7238,9 +7427,10 @@ mod tests {
             // 含空格的环境**(否则 sub 本身含空格 + 子目录 `path%foo%` 触发 4 倍 `%` 转义
             // 会让 expected 漏引号、假失败)。
             let npm_full = format!("{}\\npm.cmd", sub.to_string_lossy());
+            // codex 走 npm 锚定(5092fe51)：batch 行 = `call <npm 全路径> i -g ...`，
+            // 含字面 `%` 的 npm 路径仍须 4 倍转义。
             let expected = format!(
-                "call {} update || call {} i -g @openai/codex@latest",
-                expect_quoted_path(&bin_path),
+                "call {} i -g @openai/codex@latest",
                 expect_quoted_path(&npm_full)
             );
             assert_eq!(batch_line, expected);
@@ -7451,6 +7641,15 @@ mod tests {
             let codex =
                 wsl_tool_action_shell_command("codex", ToolLifecycleAction::Install).unwrap();
             assert_eq!(codex, "npm i -g @openai/codex@latest");
+
+            let grok = wsl_tool_action_shell_command("grok", ToolLifecycleAction::Install).unwrap();
+            assert!(
+                grok.starts_with(
+                    "bash -c 'tmp=$(mktemp) && curl -fsSL https://x.ai/cli/install.sh "
+                ) && grok.contains(" || npm i -g @xai-official/grok@latest"),
+                "WSL grok install should prefer native POSIX installer with npm fallback: {grok}"
+            );
+            assert!(!grok.contains("| bash"));
         }
 
         #[test]
@@ -7720,7 +7919,22 @@ mod tests {
             assert_eq!(
                 cmd.as_deref(),
                 Some(
-                    "/Users/me/.nvm/versions/node/v22.14.0/bin/npm i -g @google/gemini-cli@latest"
+                    "PATH='/Users/me/.nvm/versions/node/v22.14.0/bin':\"$PATH\" /Users/me/.nvm/versions/node/v22.14.0/bin/npm i -g @google/gemini-cli@latest"
+                )
+            );
+        }
+
+        #[test]
+        fn grok_nvm_anchors_to_npm_without_cli_update() {
+            let cmd = anchored_command_from_paths(
+                "grok",
+                "/Users/me/.nvm/versions/node/v22.14.0/bin/grok",
+                "/Users/me/.nvm/versions/node/v22.14.0/lib/node_modules/@xai-official/grok/bin/grok",
+            );
+            assert_eq!(
+                cmd.as_deref(),
+                Some(
+                    "PATH='/Users/me/.nvm/versions/node/v22.14.0/bin':\"$PATH\" /Users/me/.nvm/versions/node/v22.14.0/bin/npm i -g @xai-official/grok@latest"
                 )
             );
         }
@@ -7943,7 +8157,7 @@ mod tests {
             );
             assert_eq!(
                 cmd.as_deref(),
-                Some("/Users/me/.nvm/versions/node/v22.14.0/bin/npm i -g @openai/codex@latest")
+                Some("PATH='/Users/me/.nvm/versions/node/v22.14.0/bin':\"$PATH\" /Users/me/.nvm/versions/node/v22.14.0/bin/npm i -g @openai/codex@latest")
             );
         }
 
@@ -7958,7 +8172,7 @@ mod tests {
             );
             assert_eq!(
                 cmd.as_deref(),
-                Some("/opt/homebrew/bin/openclaw update --yes || /opt/homebrew/bin/npm i -g openclaw@latest")
+                Some("/opt/homebrew/bin/openclaw update --yes || PATH='/opt/homebrew/bin':\"$PATH\" /opt/homebrew/bin/npm i -g openclaw@latest")
             );
         }
 
@@ -8085,7 +8299,7 @@ mod tests {
             assert_eq!(
                 cmd.as_deref(),
                 Some(
-                    "/Users/me/.local/share/fnm_multishells/12345_abc/bin/npm i -g @openai/codex@latest"
+                    "PATH='/Users/me/.local/share/fnm_multishells/12345_abc/bin':\"$PATH\" /Users/me/.local/share/fnm_multishells/12345_abc/bin/npm i -g @openai/codex@latest"
                 )
             );
         }
@@ -8099,7 +8313,62 @@ mod tests {
             );
             assert_eq!(
                 cmd.as_deref(),
-                Some("'/Users/my name/.nvm/versions/node/v22/bin/npm' i -g @openai/codex@latest")
+                Some("PATH='/Users/my name/.nvm/versions/node/v22/bin':\"$PATH\" '/Users/my name/.nvm/versions/node/v22/bin/npm' i -g @openai/codex@latest")
+            );
+        }
+
+        #[test]
+        fn npm_anchor_supplies_sibling_node_to_env_shebang() {
+            use std::os::unix::fs::PermissionsExt;
+            use std::process::Command;
+
+            let temp = tempfile::tempdir().expect("temp dir should be created");
+            let bin = temp.path().join("home dir/.nvm/versions/node/v22.14.0/bin");
+            std::fs::create_dir_all(&bin).expect("node bin should be created");
+
+            let marker = temp.path().join("sibling-node-used");
+            let node = bin.join("node");
+            let npm = bin.join("npm");
+            std::fs::write(
+                &node,
+                format!(
+                    "#!/bin/sh\nprintf sibling-node > {}\n",
+                    shell_single_quote(&marker.to_string_lossy())
+                ),
+            )
+            .expect("fake node should be written");
+            std::fs::write(&npm, "#!/usr/bin/env node\n").expect("fake npm should be written");
+            for executable in [&node, &npm] {
+                let mut permissions = std::fs::metadata(executable)
+                    .expect("fake executable metadata should exist")
+                    .permissions();
+                permissions.set_mode(0o755);
+                std::fs::set_permissions(executable, permissions)
+                    .expect("fake executable should be executable");
+            }
+
+            let codex = bin.join("codex").to_string_lossy().into_owned();
+            let real = temp
+                .path()
+                .join("home dir/.nvm/versions/node/v22.14.0/lib/node_modules/@openai/codex/bin/codex.js")
+                .to_string_lossy()
+                .into_owned();
+            let command = anchored_command_from_paths("codex", &codex, &real)
+                .expect("nvm codex should produce an anchored npm command");
+            let output = Command::new("/bin/bash")
+                .args(["-c", &command])
+                .env("PATH", "/usr/bin:/bin")
+                .output()
+                .expect("anchored npm command should start");
+
+            assert!(
+                output.status.success(),
+                "anchored npm command failed: {}",
+                decode_command_output(&output.stderr)
+            );
+            assert_eq!(
+                std::fs::read_to_string(marker).expect("sibling node should leave a marker"),
+                "sibling-node"
             );
         }
 
@@ -8246,7 +8515,7 @@ mod tests {
             broken.runnable = false;
             assert_eq!(
                 installs_anchored_command("codex", &[broken]).as_deref(),
-                Some("/Users/me/.nvm/versions/node/v22.14.0/bin/npm uninstall -g @openai/codex || true; /Users/me/.nvm/versions/node/v22.14.0/bin/npm i -g @openai/codex@latest")
+                Some("PATH='/Users/me/.nvm/versions/node/v22.14.0/bin':\"$PATH\" /Users/me/.nvm/versions/node/v22.14.0/bin/npm uninstall -g @openai/codex || true; PATH='/Users/me/.nvm/versions/node/v22.14.0/bin':\"$PATH\" /Users/me/.nvm/versions/node/v22.14.0/bin/npm i -g @openai/codex@latest")
             );
         }
 
@@ -8258,7 +8527,7 @@ mod tests {
             let cmd = installs_anchored_command("codex", &[healthy]);
             assert_eq!(
                 cmd.as_deref(),
-                Some("/Users/me/.nvm/versions/node/v22.14.0/bin/npm i -g @openai/codex@latest")
+                Some("PATH='/Users/me/.nvm/versions/node/v22.14.0/bin':\"$PATH\" /Users/me/.nvm/versions/node/v22.14.0/bin/npm i -g @openai/codex@latest")
             );
             assert!(!cmd.unwrap().contains("uninstall"));
         }
@@ -8638,6 +8907,11 @@ mod tests {
                 "npm i -g @google/gemini-cli@latest"
             );
             assert!(!static_fallback_command("gemini").contains("gemini update"));
+            assert_eq!(
+                static_fallback_command("grok"),
+                "npm i -g @xai-official/grok@latest"
+            );
+            assert!(!static_fallback_command("grok").contains("grok update"));
             assert_eq!(
                 static_fallback_command("opencode"),
                 "opencode upgrade || npm i -g opencode-ai@latest"

@@ -1312,6 +1312,101 @@ fn apply_codex_reasoning_level_override(
     true
 }
 
+/// Catalog service tiers require id/name/description strings; speed tiers are
+/// strings. Ignore malformed server entries instead of making Codex reject the
+/// entire catalog. This does not alter prompt or tool metadata.
+fn apply_codex_company_tiers(obj: &mut serde_json::Map<String, Value>, capabilities: &Value) {
+    if let Some(tiers) = capabilities
+        .get("additional_speed_tiers")
+        .and_then(Value::as_array)
+    {
+        let tiers: Vec<_> = tiers
+            .iter()
+            .filter(|tier| tier.as_str().is_some_and(|id| !id.trim().is_empty()))
+            .cloned()
+            .collect();
+        obj.insert("additional_speed_tiers".to_string(), json!(tiers));
+    }
+    if let Some(tiers) = capabilities.get("service_tiers").and_then(Value::as_array) {
+        let mut seen = HashSet::new();
+        let tiers: Vec<_> = tiers
+            .iter()
+            .filter(|tier| {
+                let Some(id) = tier
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.trim().is_empty())
+                else {
+                    return false;
+                };
+                tier.get("name").is_some_and(Value::is_string)
+                    && tier.get("description").is_some_and(Value::is_string)
+                    && seen.insert(id)
+            })
+            .cloned()
+            .collect();
+        obj.insert("service_tiers".to_string(), json!(tiers));
+        obj.remove("default_service_tier");
+        if let Some(default) = capabilities
+            .get("default_service_tier")
+            .and_then(Value::as_str)
+            .filter(|id| seen.contains(id))
+        {
+            obj.insert("default_service_tier".to_string(), json!(default));
+        }
+    }
+}
+
+/// Apply only schema-valid pool capabilities. Official prompt/tool fields are
+/// untouched: subscriptions do not determine a company's model pool limits.
+fn apply_codex_company_capabilities(
+    obj: &mut serde_json::Map<String, Value>,
+    capabilities: &Value,
+) {
+    apply_codex_company_tiers(obj, capabilities);
+    if let Some(levels) = capabilities
+        .get("supported_reasoning_levels")
+        .and_then(Value::as_array)
+    {
+        let mut seen = HashSet::new();
+        let supported: Vec<Value> = levels
+            .iter()
+            .filter(|level| {
+                let Some(effort) = level.get("effort").and_then(Value::as_str) else {
+                    return false;
+                };
+                codex_reasoning_level_description(effort).is_some()
+                    && level.get("description").is_some_and(Value::is_string)
+                    && seen.insert(effort)
+            })
+            .cloned()
+            .collect();
+        if !supported.is_empty() {
+            let default = capabilities
+                .get("default_reasoning_level")
+                .and_then(Value::as_str)
+                .filter(|effort| seen.contains(effort))
+                .or_else(|| {
+                    obj.get("default_reasoning_level")
+                        .and_then(Value::as_str)
+                        .filter(|effort| seen.contains(effort))
+                })
+                .unwrap_or_else(|| supported.last().unwrap()["effort"].as_str().unwrap())
+                .to_string();
+            obj.insert("supported_reasoning_levels".to_string(), json!(supported));
+            obj.insert("default_reasoning_level".to_string(), json!(default));
+        }
+    }
+    if let Some(window) = capabilities
+        .get("context_window")
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0 && *value <= i64::MAX as u64)
+    {
+        obj.insert("context_window".to_string(), json!(window));
+        obj.insert("max_context_window".to_string(), json!(window));
+    }
+}
+
 fn codex_catalog_model_entry(
     template: &Value,
     spec: &CodexCatalogModelSpec,
@@ -1336,46 +1431,12 @@ fn codex_catalog_model_entry(
     entry_obj.insert("priority".to_string(), json!(1000 + priority));
     entry_obj.insert("additional_speed_tiers".to_string(), json!([]));
     entry_obj.insert("service_tiers".to_string(), json!([]));
+    entry_obj.remove("default_service_tier");
     entry_obj.insert("availability_nux".to_string(), Value::Null);
     entry_obj.insert("upgrade".to_string(), Value::Null);
 
-    // company fork: 模型能力按「供应商声明 > 本机上游表 > 模板」取，不再一律克隆模板。
-    //
-    // 模板取自 `CODEX_MODEL_CATALOG_TEMPLATE_SLUG`（gpt-5.5），它的推理档只有
-    // low/medium/high/xhigh，也没有 speed/service tier。直接克隆给所有模型会把
-    // gpt-5.6 系真实支持的 `max` / `ultra` 档、`fast` 速度档、priority 服务档
-    // 和 272k 上下文一起抹平，导致 Codex 的模型选择器少档、且选不到 Fast。
-    //
-    // 两个能力来源的分工：
-    // - `spec.capabilities`：供应商（公司号池经 `/api/client/catalog`）声明的能力。
-    //   号池支持什么取决于池内账号，与使用者个人账号无关，因此优先级最高。
-    // - `models_cache.json`：Codex 连 OpenAI 后落盘的表，反映【本机登录账号】的
-    //   订阅，适合官方 OpenAI 直连；号池场景下只作兜底。
-    //
-    // 两者都没有（自定义模型 / 第三方中转别名）时保持上面按 spec 推导的结果，
-    // 用户仍可自行配置。
-    // 上游 v4 起，能力一律来自服务端声明的 spec.capabilities；
-    // 公司版过去用 models_cache.json 兜底的做法已被上游明确弃用，故不再回退。
-    if let Some(upstream) = spec.capabilities.clone() {
-        for key in [
-            "supported_reasoning_levels",
-            "default_reasoning_level",
-            "additional_speed_tiers",
-            "service_tiers",
-        ] {
-            if let Some(value) = upstream.get(key) {
-                entry_obj.insert(key.to_string(), value.clone());
-            }
-        }
-        // 上下文窗口同样以上游为准（模板/预设常年落后于真实值）。
-        if let Some(window) = upstream
-            .get("context_window")
-            .and_then(Value::as_u64)
-            .filter(|value| *value > 0)
-        {
-            entry_obj.insert("context_window".to_string(), json!(window));
-            entry_obj.insert("max_context_window".to_string(), json!(window));
-        }
+    if let Some(capabilities) = spec.capabilities.as_ref() {
+        apply_codex_company_capabilities(entry_obj, capabilities);
     }
 
     // Image support is a model capability, not a tool-profile capability.
@@ -1480,8 +1541,8 @@ struct CodexCatalogModelSpec {
     base_instructions: Option<String>,
     /// 供应商声明的模型能力（推理档 / 速度档 / 服务档 / 上下文窗口）。
     ///
-    /// 公司号池经 `/api/client/catalog` 下发，因为号池能力取决于池内账号，
-    /// 而不是使用者个人账号；这一份优先于本机 `models_cache.json` 的推断。
+    /// 公司号池经 `/api/client/catalog` 下发。保留 GPT 官方 prompt/tools，
+    /// 推理档、窗口和速度/服务档使用校验后的公司声明。
     capabilities: Option<Value>,
     /// Per-row override for the generated catalog's `supported_reasoning_levels`
     /// (e.g. ["none", "low", "medium", "high", "xhigh", "max"]). When omitted
@@ -2299,9 +2360,9 @@ fn find_codex_official_model<'a>(model: &str, candidates: &'a [Value]) -> Option
     })
 }
 
-/// 第三方供应商上命中官方的 GPT 行：官方条目整条照搬（提示词、工具、档位、窗口都以官方
-/// 为准，不接受行里的覆盖值；窗口不同时在 `config.toml` 里设 `model_context_window`），
-/// 只改掉属于官方账号或官方后端的字段。
+/// 第三方供应商上命中官方的 GPT 行：先镜像官方 prompt/tools，移除官方账号/后端字段。
+/// 调用方随后应用校验后的公司 pool 推理档、窗口、speed/service 声明；
+/// 普通行编辑字段仍不覆盖官方 prompt/tools。
 fn codex_official_model_entry(
     official: &Value,
     model: &str,
@@ -2320,7 +2381,9 @@ fn codex_official_model_entry(
     obj.insert("priority".to_string(), json!(1000 + priority));
     // 官方隐藏的条目用户明确写了，也要出现在选择器里。
     obj.insert("visibility".to_string(), json!("list"));
-    // 速度档、升级提示归官方账号。
+    // Account-specific defaults are removed; explicit company pool capabilities
+    // are applied by the caller after mirroring official prompt/tool fields.
+    obj.remove("default_service_tier");
     obj.insert("service_tiers".to_string(), json!([]));
     obj.insert("additional_speed_tiers".to_string(), json!([]));
     obj.insert("availability_nux".to_string(), Value::Null);
@@ -2399,7 +2462,15 @@ fn codex_catalog_from_specs_for_row(
         .enumerate()
         .map(
             |(index, spec)| match find_codex_official_model(&spec.model, &official) {
-                Some(found) => codex_official_model_entry(found, &spec.model, index, profile),
+                Some(found) => {
+                    let mut entry = codex_official_model_entry(found, &spec.model, index, profile);
+                    if let (Some(obj), Some(capabilities)) =
+                        (entry.as_object_mut(), spec.capabilities.as_ref())
+                    {
+                        apply_codex_company_capabilities(obj, capabilities);
+                    }
+                    entry
+                }
                 None => codex_catalog_model_entry(
                     &template,
                     spec,
@@ -5054,6 +5125,113 @@ wire_api = "responses"
         assert!(glm.get("model_messages").is_none());
         assert!(glm.get("apply_patch_tool_type").is_none());
         assert_eq!(glm["shell_type"], "shell_command");
+    }
+
+    #[test]
+    fn company_catalog_preserves_tiers_but_mirrors_official_reasoning() {
+        let tiers = json!([{ "id": "priority", "name": "Fast", "description": "Company pool" }]);
+        let models = with_official_models(official_gpt_rows(), || {
+            catalog_for(
+                json!([{ "model": "gpt-6-sol", "capabilities": {
+                    "supported_reasoning_levels": [{ "effort": "invalid", "description": "wrong" }],
+                    "default_reasoning_level": "invalid",
+                    "additional_speed_tiers": ["fast"],
+                    "service_tiers": tiers,
+                    "default_service_tier": "priority"
+                }}]),
+                "",
+                CodexCatalogToolProfile::NativeResponses,
+            )
+        });
+        let gpt = &models[0];
+        assert_eq!(
+            gpt["supported_reasoning_levels"],
+            official_gpt_rows()[1]["supported_reasoning_levels"]
+        );
+        assert_eq!(gpt["default_reasoning_level"], "low");
+        assert_eq!(
+            gpt["model_messages"]["instructions_template"],
+            "GPT-6 Sol prompt"
+        );
+        assert_eq!(gpt["additional_speed_tiers"], json!(["fast"]));
+        assert_eq!(gpt["service_tiers"], tiers);
+        assert_eq!(gpt["default_service_tier"], "priority");
+    }
+
+    #[test]
+    fn company_gpt_catalog_uses_pool_reasoning_and_window_with_official_tools() {
+        let models = with_official_models(official_gpt_rows(), || {
+            catalog_for(
+                json!([{ "model": "gpt-6-sol", "capabilities": {
+                    "supported_reasoning_levels": [
+                        {"effort": "max", "description": "Pool max"},
+                        {"effort": "ultra", "description": "Pool ultra"}
+                    ],
+                    "default_reasoning_level": "ultra",
+                    "context_window": 1_000_000,
+                    "additional_speed_tiers": ["fast"],
+                    "service_tiers": [{"id": "priority", "name": "Fast", "description": "Pool"}]
+                }}]),
+                "",
+                CodexCatalogToolProfile::NativeResponses,
+            )
+        });
+        let entry = &models[0];
+        assert_eq!(
+            entry["supported_reasoning_levels"],
+            json!([
+                {"effort": "max", "description": "Pool max"},
+                {"effort": "ultra", "description": "Pool ultra"}
+            ])
+        );
+        assert_eq!(entry["default_reasoning_level"], "ultra");
+        assert_eq!(entry["context_window"], 1_000_000);
+        assert_eq!(entry["max_context_window"], 1_000_000);
+        assert_eq!(
+            entry["model_messages"]["instructions_template"],
+            "GPT-6 Sol prompt"
+        );
+        assert_eq!(entry["apply_patch_tool_type"], "freeform");
+        assert_eq!(entry["additional_speed_tiers"], json!(["fast"]));
+        assert_eq!(entry["service_tiers"][0]["id"], "priority");
+    }
+
+    #[test]
+    fn company_catalog_rejects_malformed_capability_shapes() {
+        let models = catalog_for(
+            json!([{ "model": "company-alias", "capabilities": {
+                "supported_reasoning_levels": [
+                    { "effort": "high", "description": "Company high" },
+                    { "effort": "bogus", "description": "Typo" },
+                    { "effort": 123, "description": "Wrong type" }
+                ],
+                "default_reasoning_level": "bogus",
+                "additional_speed_tiers": ["fast", 123],
+                "service_tiers": [
+                    { "id": "priority", "name": "Fast", "description": "Company pool" },
+                    { "id": "invalid", "name": "Missing description" }
+                ],
+                "default_service_tier": "invalid"
+            }}]),
+            "",
+            CodexCatalogToolProfile::NativeResponses,
+        );
+        let entry = &models[0];
+        assert_eq!(
+            entry["supported_reasoning_levels"],
+            json!([
+                { "effort": "high", "description": "Company high" }
+            ])
+        );
+        assert_eq!(entry["default_reasoning_level"], "high");
+        assert_eq!(entry["additional_speed_tiers"], json!(["fast"]));
+        assert_eq!(
+            entry["service_tiers"],
+            json!([
+                { "id": "priority", "name": "Fast", "description": "Company pool" }
+            ])
+        );
+        assert!(entry.get("default_service_tier").is_none());
     }
 
     #[test]

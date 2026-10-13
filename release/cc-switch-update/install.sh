@@ -3,23 +3,25 @@ set -euo pipefail
 
 APP_NAME="CC Switch"
 APP_BUNDLE="${APP_NAME}.app"
-INSTALL_DIR="/Applications"
+INSTALL_DIR="${CC_SWITCH_APP_DIR:-/Applications}"
 INSTALL_PATH="${INSTALL_DIR}/${APP_BUNDLE}"
 RELEASE_REPO="${CC_SWITCH_RELEASE_REPO:-qinghua362330/cc-switch-company}"
 RELEASE_TAG="${CC_SWITCH_RELEASE_TAG:-}"
 METADATA_URL="${CC_SWITCH_METADATA_URL:-}"
 DOWNLOAD_URL="${CC_SWITCH_DOWNLOAD_URL:-}"
 EXPECTED_SHA256="${CC_SWITCH_SHA256:-}"
-WORKDIR="$(mktemp -d)"
+WORKDIR=""
 MOUNT_DIR=""
 
 cleanup() {
+  guard_test_paths
   if [[ -n "${MOUNT_DIR}" && -d "${MOUNT_DIR}" ]]; then
     hdiutil detach "${MOUNT_DIR}" -quiet >/dev/null 2>&1 || true
   fi
-  rm -rf "${WORKDIR}"
+  if [[ -n "${WORKDIR}" ]]; then
+    rm -rf "${WORKDIR}"
+  fi
 }
-trap cleanup EXIT
 
 say() {
   printf '[CC Switch] %s\n' "$1" >&2
@@ -29,6 +31,60 @@ fail() {
   printf '[CC Switch] 安装失败：%s\n' "$1" >&2
   exit 1
 }
+
+guard_test_paths() {
+  # A test home automatically enables confinement, even if the explicit mode is omitted.
+  if [[ "${CC_SWITCH_TEST_MODE:-0}" != "1" && -z "${CC_SWITCH_TEST_HOME:-}" ]]; then
+    return
+  fi
+  [[ -n "${CC_SWITCH_TEST_HOME:-}" && -n "${CC_SWITCH_APP_DIR:-}" ]] \
+    || fail "test guard: CC_SWITCH_TEST_HOME and CC_SWITCH_APP_DIR are required"
+  command -v python3 >/dev/null 2>&1 || fail "test guard: python3 is required for path validation"
+  python3 - "$INSTALL_DIR" "$INSTALL_PATH" "${TMPDIR:-}" "$WORKDIR" "$MOUNT_DIR" "${1:-}" <<'PY_GUARD' \
+    || fail "test guard: installer paths must stay inside CC_SWITCH_TEST_HOME"
+import os
+import pathlib
+import sys
+
+home = pathlib.Path(os.environ["CC_SWITCH_TEST_HOME"])
+if not home.is_absolute() or not home.is_dir():
+    raise SystemExit("test guard: test home must be an existing absolute directory")
+root = home.resolve()
+if root == pathlib.Path("/"):
+    raise SystemExit("test guard: filesystem root cannot be a test home")
+lexical_roots = {pathlib.Path(os.path.abspath(home)), root}
+
+def confined(value):
+    lexical = pathlib.Path(os.path.abspath(value))
+    # Reject outside paths BEFORE resolving them; never inspect a real app destination.
+    if not any(lexical.is_relative_to(base) and lexical != base for base in lexical_roots):
+        raise SystemExit("test guard: path is outside test home: " + value)
+    resolved = lexical.resolve()
+    if not resolved.is_relative_to(root) or resolved == root:
+        raise SystemExit("test guard: symlink escapes test home")
+    return resolved
+
+install_dir, install_path, tmpdir, workdir, mount_dir, source_app = sys.argv[1:]
+if not tmpdir:
+    raise SystemExit("test guard: TMPDIR is required")
+confined(install_dir)
+confined(install_path)
+temporary = confined(tmpdir)
+if temporary != root / "tmp" or not temporary.is_dir():
+    raise SystemExit("test guard: TMPDIR must be the test home's tmp directory")
+if workdir and not confined(workdir).is_relative_to(temporary):
+    raise SystemExit("test guard: WORKDIR is outside the test tmp directory")
+if mount_dir:
+    confined(mount_dir)
+if source_app:
+    confined(source_app)
+PY_GUARD
+}
+
+guard_test_paths
+WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/cc-switch-install.XXXXXX")"
+guard_test_paths
+trap cleanup EXIT
 
 python3_usable() {
   command -v python3 >/dev/null 2>&1 || return 1
@@ -274,11 +330,6 @@ resolve_from_metadata() {
     || fail "无法读取 GitHub Release 版本信息"
 
   candidates=("darwin-${arch}" "darwin-universal" "macos-universal" "macOS-universal")
-  if [[ "$arch" == "x86_64" ]]; then
-    candidates+=("darwin-aarch64")
-  else
-    candidates+=("darwin-x86_64")
-  fi
 
   for key in "${candidates[@]}"; do
     if try_metadata_package "$metadata" "$key"; then
@@ -303,7 +354,17 @@ resolve_from_metadata() {
 copy_app() {
   local app_path="$1"
 
+  guard_test_paths "$app_path"
   [[ -d "$app_path" ]] || fail "没有找到 ${APP_BUNDLE}"
+  # Verify the payload itself before stopping/removing the installed application.
+  local arch binary binary_arches required_arch
+  arch="$(detect_arch)"
+  required_arch="$arch"
+  [[ "$arch" != "aarch64" ]] || required_arch="arm64"
+  binary="$app_path/Contents/MacOS/cc-switch"
+  [[ -f "$binary" ]] || fail "安装包缺少 cc-switch 可执行文件"
+  binary_arches="$(lipo -archs "$binary" 2>/dev/null)" || fail "无法检查安装包 Mach-O 架构"
+  [[ " $binary_arches " == *" $required_arch "* ]] || fail "安装包不支持当前 Mac 架构：$required_arch"
 
   say "正在退出已打开的 ${APP_NAME}..."
   osascript -e "tell application \"${APP_NAME}\" to quit" >/dev/null 2>&1 || true

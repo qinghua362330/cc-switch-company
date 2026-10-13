@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*'
+      - '!v*-company.*'
   # 手动触发即干跑：完整编译、签名、公证，产物只留在 workflow 里，不建 GitHub Release
   workflow_dispatch:
 
@@ -22,8 +23,7 @@ jobs:
   # 所以这里自己跑一遍检查所有随包摘要的那份单测。
   whats-new-check:
     name: Check in-app what's new summaries
-    # 公司发布走 company-release.yml；上游 tag 过滤里的 '!v*-company*' 对 tag 不生效，
-    # 必须在这里跳过，否则公司 tag 会触发上游发布并因缺少 src/whats-new 摘要而失败。
+    # 公司 tag 排除在 push 触发器外；job guard 同时保护手动 dispatch。
     if: ${{ !contains(github.ref_name, '-company.') }}
     runs-on: ubuntu-22.04
     steps:
