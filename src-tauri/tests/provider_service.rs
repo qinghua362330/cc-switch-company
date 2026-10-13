@@ -348,7 +348,8 @@ requires_openai_auth = true
 fn provider_service_switch_codex_preserves_oauth_and_keeps_rows_untouched() {
     let _guard = test_mutex().lock().unwrap_or_else(|e| e.into_inner());
     reset_test_fs();
-    enable_codex_official_auth_preservation();
+    // The company default preserves the official Codex OAuth login while
+    // switching to a third-party provider.
     let _home = ensure_test_home();
 
     let live_auth = json!({
@@ -674,8 +675,13 @@ wire_api = "responses"
 fn provider_service_switch_codex_default_removes_auth_json_when_preservation_off() {
     let _guard = test_mutex().lock().unwrap_or_else(|e| e.into_inner());
     reset_test_fs();
-    // Intentionally do NOT enable preservation: this locks the default opt-out
-    // behavior where a third-party switch deletes auth.json outright — the
+    cc_switch_lib::update_settings(cc_switch_lib::AppSettings {
+        preserve_codex_official_auth_on_switch: false,
+        ..Default::default()
+    })
+    .expect("disable Codex official auth preservation");
+    // Explicitly opt out: this locks the behavior where a third-party switch
+    // deletes auth.json outright — the
     // official OAuth login is not preserved, and the third-party key never
     // lands there either (it travels as the provider-scoped bearer token in
     // config.toml). It is the dual of
@@ -749,7 +755,7 @@ requires_openai_auth = true
 
     assert!(
         !cc_switch_lib::get_codex_auth_path().exists(),
-        "default (preservation off) must delete auth.json on a third-party switch — \
+        "preservation opt-out must delete auth.json on a third-party switch — \
          the official login goes away and the key rides in config.toml instead"
     );
     let live_config =

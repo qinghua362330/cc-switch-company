@@ -1,5 +1,5 @@
 id: codex-official
-name: OpenAI Official
+name: 官方账号登入
 settings_config: {"auth":{},"config":""}
 website_url: https://chatgpt.com/codex
 category: official

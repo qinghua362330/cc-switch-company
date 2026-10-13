@@ -1,5 +1,5 @@
 id: claude-official
-name: Claude Official
+name: 官方账号登入
 settings_config: {"env":{}}
 website_url: https://www.anthropic.com/claude-code
 category: official

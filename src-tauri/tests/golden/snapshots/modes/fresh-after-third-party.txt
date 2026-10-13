@@ -1,4 +1,5 @@
 .claude/settings.json 600
+.codex/auth.json 600
 .codex/cc-switch-model-catalog.json 644
 .codex/config.toml 600
 .gemini/.env 600
