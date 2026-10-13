@@ -178,38 +178,6 @@ jobs:
       - name: Run tests
         run: cargo nextest run --manifest-path src-tauri/Cargo.toml --profile ci
 
-      - name: Record Windows test loader diagnostics
-        if: failure() && runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Continue'
-          $out = 'windows-loader-diagnostics'
-          New-Item -ItemType Directory -Force $out | Out-Null
-          $test = Get-ChildItem src-tauri/target/debug/deps -Filter 'cc_switch_lib-*.exe' |
-            Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          if ($test) {
-            Copy-Item $test.FullName $out
-            $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-            $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-            $tools = Get-ChildItem "$vs\VC\Tools\MSVC" -Directory |
-              Sort-Object Name -Descending | Select-Object -First 1
-            $dumpbin = Join-Path $tools.FullName 'bin/Hostx64/x64/dumpbin.exe'
-            & $dumpbin /IMPORTS $test.FullName | Set-Content "$out/imports.txt"
-          }
-          foreach ($name in @('ucrtbase.dll', 'vcruntime140.dll', 'msvcp140.dll', 'kernel32.dll')) {
-            $file = Get-Item "$env:WINDIR/System32/$name" -ErrorAction SilentlyContinue
-            if ($file) { "$name $($file.VersionInfo.FileVersion)" | Add-Content "$out/runtime-versions.txt" }
-          }
-
-      - name: Upload Windows test loader diagnostics
-        if: failure() && runner.os == 'Windows'
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-test-loader-${{ matrix.os }}
-          path: windows-loader-diagnostics/
-          if-no-files-found: warn
-          retention-days: 7
-
   backend-windows-wsl2:
     name: Backend Checks (Windows + WSL2 home)
     runs-on: windows-2025

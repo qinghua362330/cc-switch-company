@@ -322,6 +322,16 @@ resolve_from_metadata "$ARCH"
         self.assertNotEqual(self.bash(code, BUILD_SHA='fixture-sha', GITHUB_REPOSITORY='fixture/repository', CI_EXIT='1').returncode, 0)
         self.assertNotEqual(self.bash(code, BUILD_SHA='fixture-sha', GITHUB_REPOSITORY='fixture/repository', CI_RUN_ID=' ').returncode, 0)
 
+    def test_windows_build_embeds_common_controls_for_tests_without_duplicate_app_resources(self):
+        build = (ROOT / 'src-tauri/build.rs').read_text()
+        self.assertIn('cargo:rustc-link-arg=/MANIFEST:EMBED', build)
+        self.assertIn('/MANIFESTINPUT:', build)
+        self.assertIn('cargo:rustc-link-arg-bins=/MANIFEST:NO', build)
+        self.assertIn('CARGO_MANIFEST_DIR', build)
+        manifest = (ROOT / 'src-tauri/common-controls.manifest').read_text()
+        self.assertIn('Microsoft.Windows.Common-Controls', manifest)
+        self.assertIn('version="6.0.0.0"', manifest)
+
     def test_manifest_fixture_contains_complete_company_identity(self):
         assets = self.home / 'release-assets'; assets.mkdir()
         for name in ['fixture-Windows-company-x64.msi', 'fixture-macOS-company-universal.tar.gz']:
