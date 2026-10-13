@@ -262,10 +262,12 @@ describe("DeepLinkImportDialog", () => {
       );
 
       const toggle = await screen.findByRole("switch");
-      expect(toggle).toBeChecked();
-      expect(
-        screen.getByText("deeplink.providerEnabledWarning"),
-      ).toBeInTheDocument();
+      await waitFor(() => {
+        expect(toggle).toBeChecked();
+        expect(
+          screen.getByText("deeplink.providerEnabledWarning"),
+        ).toBeInTheDocument();
+      });
 
       await user.click(toggle);
       expect(toggle).not.toBeChecked();
