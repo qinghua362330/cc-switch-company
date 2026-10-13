@@ -2,6 +2,7 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { Profiler } from "react";
 import { DeepLinkImportDialog } from "@/components/DeepLinkImportDialog";
 import { http, HttpResponse } from "msw";
 import i18n from "i18next";
@@ -252,6 +253,43 @@ describe("DeepLinkImportDialog", () => {
       apiKey: "sk-provider-key",
       ...extra,
     });
+
+    it.each([
+      {
+        resource: "provider",
+        app: "opencode",
+      },
+      {
+        resource: "prompt",
+        app: "claude",
+        content: btoa("# review"),
+        enabled: true,
+      },
+    ])(
+      "shows the correct activation state on the first $resource render",
+      async (link) => {
+        const renderedStates: Array<string | null> = [];
+        render(
+          <Profiler
+            id="deeplink-activation"
+            onRender={() => {
+              // Observe every committed render, before passive effects can fix a stale value.
+              const toggle = screen.queryByRole("switch");
+              if (toggle)
+                renderedStates.push(toggle.getAttribute("aria-checked"));
+            }}
+          >
+            <DeepLinkImportDialog />
+          </Profiler>,
+          { wrapper: Wrapper },
+        );
+        act(() => deliverDeepLink(providerLink(link)));
+
+        await screen.findByRole("switch");
+        expect(renderedStates.length).toBeGreaterThan(0);
+        expect(new Set(renderedStates)).toEqual(new Set(["true"]));
+      },
+    );
 
     it("starts from the link's enabled and lets the user turn switching off", async () => {
       const sent = captureImport();
