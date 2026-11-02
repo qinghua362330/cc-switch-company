@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location("company_promotion", ROOT / "scripts/publish-company-update.py")
@@ -14,6 +15,14 @@ COMMIT = "a" * 40
 
 
 class PromotionTests(unittest.TestCase):
+    def test_health_accepts_success_and_auth_required_but_not_server_failure(self):
+        with patch.object(MODULE.urllib.request, "urlopen", return_value=Mock()):
+            self.assertTrue(MODULE.service_healthy("http://localhost/update"))
+        for code, expected in ((401, True), (500, False), (404, False)):
+            error = MODULE.urllib.error.HTTPError("http://localhost/update", code, "fixture", {}, None)
+            with patch.object(MODULE.urllib.request, "urlopen", side_effect=error):
+                self.assertEqual(MODULE.service_healthy("http://localhost/update"), expected)
+
     def manifest(self):
         prefix = f"https://github.com/{MODULE.REPOSITORY}/releases/download/{TAG}/"
         platforms = {key: {"signature": "fixture", "url": prefix + key + ".pkg"}

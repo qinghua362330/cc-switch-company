@@ -76,6 +76,7 @@ def atomic_replace(path, data, mode):
 def service_healthy(url):
     try:
         urllib.request.urlopen(url, timeout=3).close()
+        return True
     except urllib.error.HTTPError as error:
         return error.code == 401
     except (OSError, urllib.error.URLError):
