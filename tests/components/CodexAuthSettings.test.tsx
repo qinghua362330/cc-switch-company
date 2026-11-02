@@ -133,3 +133,119 @@ describe("CodexAuthSettings session compression toggle", () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 });
+
+const defaults: SettingsFormState = {
+  language: "en",
+  showInTray: true,
+  minimizeToTrayOnClose: true,
+};
+
+describe("CodexAuthSettings quota fallback", () => {
+  beforeEach(() => {
+    getCompressionMock.mockResolvedValue(false);
+    diskUsageMock.mockResolvedValue(0);
+  });
+
+  const renderQuotaSettings = async (
+    settings: SettingsFormState,
+    onChange: ReturnType<typeof vi.fn>,
+  ) => {
+    await act(async () => {
+      render(<CodexAuthSettings settings={settings} onChange={onChange} />);
+    });
+  };
+
+  it("defaults quota, login preservation and unified history on", async () => {
+    const onChange = vi.fn();
+    await renderQuotaSettings(defaults, onChange);
+    const toggle = screen.getByRole("switch", {
+      name: "settings.codexQuotaAutoFallback",
+    });
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+    expect(
+      screen.getByRole("switch", {
+        name: "settings.preserveCodexOfficialAuthOnSwitch",
+      }),
+    ).toHaveAttribute("aria-checked", "true");
+    expect(
+      screen.getByRole("switch", {
+        name: "settings.unifyCodexSessionHistory",
+      }),
+    ).toHaveAttribute("aria-checked", "true");
+    fireEvent.click(toggle);
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange).toHaveBeenCalledWith({
+      codexQuotaAutoFallback: false,
+    });
+  });
+
+  it("preserves an explicit opt-out even when login preservation is on", async () => {
+    const onChange = vi.fn();
+    await renderQuotaSettings(
+      {
+        ...defaults,
+        preserveCodexOfficialAuthOnSwitch: true,
+        codexQuotaAutoFallback: false,
+      },
+      onChange,
+    );
+    expect(
+      screen.getByRole("switch", { name: "settings.codexQuotaAutoFallback" }),
+    ).toHaveAttribute("aria-checked", "false");
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("retains fallback when login preservation is off and allows turning it off", async () => {
+    const onChange = vi.fn();
+    await renderQuotaSettings(
+      {
+        ...defaults,
+        preserveCodexOfficialAuthOnSwitch: false,
+        unifyCodexSessionHistory: false,
+        codexQuotaAutoFallback: true,
+      },
+      onChange,
+    );
+    const toggle = screen.getByRole("switch", {
+      name: "settings.codexQuotaAutoFallback",
+    });
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+    expect(
+      screen.getByRole("switch", {
+        name: "settings.preserveCodexOfficialAuthOnSwitch",
+      }),
+    ).toHaveAttribute("aria-checked", "false");
+    expect(
+      screen.getByRole("switch", {
+        name: "settings.unifyCodexSessionHistory",
+      }),
+    ).toHaveAttribute("aria-checked", "false");
+    expect(onChange).not.toHaveBeenCalled();
+    fireEvent.click(toggle);
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange).toHaveBeenCalledWith({
+      codexQuotaAutoFallback: false,
+    });
+  });
+
+  it("does not alter fallback when changing login preservation", async () => {
+    const onChange = vi.fn();
+    await renderQuotaSettings(
+      {
+        ...defaults,
+        preserveCodexOfficialAuthOnSwitch: true,
+        codexQuotaAutoFallback: true,
+      },
+      onChange,
+    );
+    fireEvent.click(
+      screen.getByRole("switch", {
+        name: "settings.preserveCodexOfficialAuthOnSwitch",
+      }),
+    );
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange).toHaveBeenCalledWith({
+      preserveCodexOfficialAuthOnSwitch: false,
+    });
+  });
+});

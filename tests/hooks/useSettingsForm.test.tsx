@@ -28,6 +28,55 @@ afterEach(() => {
 });
 
 describe("useSettingsForm Hook", () => {
+  it.each([
+    [false, false],
+    [false, true],
+    [true, false],
+    [true, true],
+  ])(
+    "preserves explicit automatic switching %s with login preservation %s on load and reset",
+    (enabled, preserveLogin) => {
+      const data = {
+        showInTray: true,
+        minimizeToTrayOnClose: true,
+        codexQuotaAutoFallback: enabled,
+        preserveCodexOfficialAuthOnSwitch: preserveLogin,
+        unifyCodexSessionHistory: !preserveLogin,
+      };
+      useSettingsQueryMock.mockReturnValue({ data, isLoading: false });
+      const { result } = renderHook(() => useSettingsForm());
+      expect(result.current.settings?.codexQuotaAutoFallback).toBe(enabled);
+      expect(result.current.settings?.preserveCodexOfficialAuthOnSwitch).toBe(
+        preserveLogin,
+      );
+      expect(result.current.settings?.unifyCodexSessionHistory).toBe(
+        !preserveLogin,
+      );
+      act(() =>
+        result.current.updateSettings({
+          codexQuotaAutoFallback: !enabled,
+          preserveCodexOfficialAuthOnSwitch: !preserveLogin,
+          unifyCodexSessionHistory: preserveLogin,
+        }),
+      );
+      expect(result.current.settings?.codexQuotaAutoFallback).toBe(!enabled);
+      expect(result.current.settings?.preserveCodexOfficialAuthOnSwitch).toBe(
+        !preserveLogin,
+      );
+      expect(result.current.settings?.unifyCodexSessionHistory).toBe(
+        preserveLogin,
+      );
+      act(() => result.current.resetSettings(data));
+      expect(result.current.settings?.codexQuotaAutoFallback).toBe(enabled);
+      expect(result.current.settings?.preserveCodexOfficialAuthOnSwitch).toBe(
+        preserveLogin,
+      );
+      expect(result.current.settings?.unifyCodexSessionHistory).toBe(
+        !preserveLogin,
+      );
+    },
+  );
+
   it("should normalize settings and sync language on initialization", async () => {
     useSettingsQueryMock.mockReturnValue({
       data: {
@@ -51,6 +100,10 @@ describe("useSettingsForm Hook", () => {
     expect(settings.showInTray).toBe(true);
     expect(settings.minimizeToTrayOnClose).toBe(true);
     expect(settings.enableClaudePluginIntegration).toBe(false);
+    expect(settings.codexQuotaAutoFallback).toBe(true);
+    expect(settings.preserveCodexOfficialAuthOnSwitch).toBe(true);
+    expect(settings.unifyCodexSessionHistory).toBe(true);
+    expect(settings.codexStackClassicTools).toBe(true);
     expect(settings.claudeConfigDir).toBe("/Users/demo");
     expect(settings.codexConfigDir).toBeUndefined();
     expect(settings.language).toBe("en");
@@ -142,6 +195,12 @@ describe("useSettingsForm Hook", () => {
     });
 
     expect(result.current.settings?.showInTray).toBe(false);
+    expect(result.current.settings?.codexQuotaAutoFallback).toBe(true);
+    expect(result.current.settings?.preserveCodexOfficialAuthOnSwitch).toBe(
+      true,
+    );
+    expect(result.current.settings?.unifyCodexSessionHistory).toBe(true);
+    expect(result.current.settings?.codexStackClassicTools).toBe(true);
 
     changeLanguageSpy.mockClear();
     act(() => {
@@ -190,6 +249,10 @@ describe("useSettingsForm Hook", () => {
     expect(settings.showInTray).toBe(false);
     expect(settings.minimizeToTrayOnClose).toBe(false);
     expect(settings.enableClaudePluginIntegration).toBe(true);
+    expect(settings.codexQuotaAutoFallback).toBe(true);
+    expect(settings.preserveCodexOfficialAuthOnSwitch).toBe(true);
+    expect(settings.unifyCodexSessionHistory).toBe(true);
+    expect(settings.codexStackClassicTools).toBe(true);
     expect(settings.claudeConfigDir).toBe("/reset");
     expect(settings.codexConfigDir).toBeUndefined();
     expect(settings.piConfigDir).toBe("/pi-reset");

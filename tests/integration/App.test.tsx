@@ -1,4 +1,5 @@
 import { Suspense, type ComponentType } from "react";
+import App from "@/App";
 import { UpdateProvider } from "@/contexts/UpdateContext";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
@@ -8,8 +9,8 @@ import {
   waitFor,
   fireEvent,
   within,
-  act,
 } from "@testing-library/react";
+import * as tauriEvents from "@tauri-apps/api/event";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { http, HttpResponse } from "msw";
 import { providersApi } from "@/lib/api/providers";
@@ -26,6 +27,7 @@ import { server } from "../msw/server";
 const GUIDE_ACK_STORAGE_KEY = "token-switch-company-auth-guide-ack-v1";
 const toastSuccessMock = vi.fn();
 const toastErrorMock = vi.fn();
+const toastInfoMock = vi.fn();
 const skillsPanelMocks = vi.hoisted(() => ({
   initialViews: [] as string[],
 }));
@@ -54,6 +56,7 @@ vi.mock("sonner", () => ({
   toast: {
     success: (...args: unknown[]) => toastSuccessMock(...args),
     error: (...args: unknown[]) => toastErrorMock(...args),
+    info: (...args: unknown[]) => toastInfoMock(...args),
   },
 }));
 
@@ -249,12 +252,45 @@ const renderApp = (AppComponent: ComponentType) => {
   );
 };
 
+const waitForAppHeader = () =>
+  waitFor(() => {
+    const header = document.querySelector("main header");
+    if (!(header instanceof HTMLElement)) {
+      throw new Error("App header has not mounted yet");
+    }
+    return header;
+  });
+
+const renderAppWithSubscription = async (
+  AppComponent: ComponentType,
+  eventName: string,
+) => {
+  const listenSpy = vi.spyOn(tauriEvents, "listen");
+  try {
+    const rendered = renderApp(AppComponent);
+    await waitFor(() =>
+      expect(listenSpy).toHaveBeenCalledWith(eventName, expect.any(Function)),
+    );
+    // Wait for registration and the hook's cleanup handle, not unrelated UI data.
+    const index = listenSpy.mock.calls.findIndex(
+      ([name]) => name === eventName,
+    );
+    await act(async () => {
+      await listenSpy.mock.results[index].value;
+    });
+    return rendered;
+  } finally {
+    listenSpy.mockRestore();
+  }
+};
+
 describe("App integration with MSW", () => {
   beforeEach(() => {
     resetProviderState();
     setSettings({ firstRunNoticeConfirmed: true });
     toastSuccessMock.mockReset();
     toastErrorMock.mockReset();
+    toastInfoMock.mockReset();
     skillsPanelMocks.initialViews = [];
     windowMocks.isLinux.mockReturnValue(false);
     windowMocks.isMaximized.mockResolvedValue(false);
@@ -273,8 +309,55 @@ describe("App integration with MSW", () => {
     localStorage.setItem(GUIDE_ACK_STORAGE_KEY, "1");
   });
 
+  it.each([
+    [true, "settings.codexQuotaFallbackActive"],
+    [false, "settings.codexQuotaFallbackInactive"],
+  ])(
+    "reports quota fallback configuration status %s without claiming live success",
+    async (active, key) => {
+      await renderAppWithSubscription(App, "codex-quota-fallback-changed");
+      await act(async () => {
+        emitTauriEvent("codex-quota-fallback-changed", { active });
+      });
+      expect(toastInfoMock).toHaveBeenCalledTimes(1);
+      expect(toastInfoMock).toHaveBeenCalledWith(key, {
+        duration: 8000,
+      });
+      expect(toastSuccessMock).not.toHaveBeenCalled();
+    },
+    15000,
+  );
+
+  it.each([
+    ["waiting", "settings.codexLoginModeRefreshWaiting"],
+    ["reloaded", "settings.codexLoginModeRefreshReloaded"],
+    ["manual", "settings.codexLoginModeRefreshManual"],
+  ])(
+    "reports Codex background refresh status %s without claiming send is unlocked",
+    async (status, key) => {
+      const { unmount } = await renderAppWithSubscription(
+        App,
+        "codex-login-mode-refresh",
+      );
+      await act(async () => {
+        emitTauriEvent("codex-login-mode-refresh", { status });
+      });
+      expect(toastInfoMock).toHaveBeenCalledTimes(1);
+      expect(toastInfoMock).toHaveBeenCalledWith(key, {
+        duration: 8000,
+      });
+      expect(toastSuccessMock).not.toHaveBeenCalled();
+      expect(toastErrorMock).not.toHaveBeenCalled();
+
+      unmount();
+      toastInfoMock.mockClear();
+      emitTauriEvent("codex-login-mode-refresh", { status });
+      expect(toastInfoMock).not.toHaveBeenCalled();
+    },
+    15000,
+  );
+
   it("covers basic provider flows via real hooks", async () => {
-    const { default: App } = await import("@/App");
     renderApp(App);
 
     await waitFor(() =>
@@ -347,7 +430,6 @@ describe("App integration with MSW", () => {
       }),
     );
 
-    const { default: App } = await import("@/App");
     renderApp(App);
 
     await waitFor(() => expect(modeRequests).toBeGreaterThan(0));
@@ -365,7 +447,6 @@ describe("App integration with MSW", () => {
   });
 
   it("resets provider view scroll when switching apps", async () => {
-    const { default: App } = await import("@/App");
     const { container } = renderApp(App);
 
     await waitFor(() =>
@@ -402,7 +483,6 @@ describe("App integration with MSW", () => {
   }, 10_000);
 
   it("closes provider panels when navigating away from the app page", async () => {
-    const { default: App } = await import("@/App");
     renderApp(App);
 
     await waitFor(() =>
@@ -446,7 +526,6 @@ describe("App integration with MSW", () => {
   }, 10_000);
 
   it("asks before leaving an editor page with unsaved changes", async () => {
-    const { default: App } = await import("@/App");
     renderApp(App);
     await waitFor(() =>
       expect(screen.getByTestId("provider-list").textContent).toContain(
@@ -493,7 +572,6 @@ describe("App integration with MSW", () => {
   }, 10_000);
 
   it("keeps the unsaved guard when re-clicking the current page", async () => {
-    const { default: App } = await import("@/App");
     renderApp(App);
     await waitFor(() =>
       expect(screen.getByTestId("provider-list").textContent).toContain(
@@ -501,18 +579,18 @@ describe("App integration with MSW", () => {
       ),
     );
 
-    fireEvent.click(sidebarApp("MCP"));
+    fireEvent.click(await sidebarApp("MCP"));
     fireEvent.input(await screen.findByLabelText("mcp-field"), {
       target: { value: "draft" },
     });
 
     // 再点当前页：不离开，所以不问，也不能把未保存登记清掉
-    fireEvent.click(sidebarApp("MCP"));
+    fireEvent.click(await sidebarApp("MCP"));
     expect(screen.queryByTestId("confirm-dialog")).not.toBeInTheDocument();
     expect(screen.getByTestId("mcp-editor")).toBeInTheDocument();
 
     // 之后真的离开时照样要问
-    fireEvent.click(sidebarApp("nav.usage"));
+    fireEvent.click(await sidebarApp("nav.usage"));
     expect(await screen.findByTestId("confirm-message")).toHaveTextContent(
       "common.unsavedLeaveMessage",
     );
@@ -521,7 +599,6 @@ describe("App integration with MSW", () => {
   }, 10_000);
 
   it("shows toast when auto sync fails in background", async () => {
-    const { default: App } = await import("@/App");
     renderApp(App);
 
     await waitFor(() =>
@@ -581,7 +658,6 @@ describe("App integration with MSW", () => {
     setCurrentProviderId("openclaw", "deepseek");
     setLiveProviderIds("openclaw", ["deepseek-copy"]);
 
-    const { default: App } = await import("@/App");
     renderApp(App);
 
     fireEvent.click(await sidebarApp("OpenClaw"));
@@ -627,7 +703,6 @@ describe("App integration with MSW", () => {
       const add = vi.spyOn(providersApi, "add");
       const sort = vi.spyOn(providersApi, "updateSortOrder");
       try {
-        const { default: App } = await import("@/App");
         renderApp(App);
         await waitFor(() =>
           expect(screen.getByTestId("provider-list").textContent).toContain(
@@ -667,7 +742,6 @@ describe("App integration with MSW", () => {
     });
     setCurrentProviderId("opencode", "custom");
     setLiveProviderIds("opencode", ["custom-copy"]);
-    const { default: App } = await import("@/App");
     renderApp(App);
     await waitFor(() =>
       expect(screen.getByTestId("provider-list").textContent).toContain(
@@ -706,7 +780,6 @@ describe("App integration with MSW", () => {
       setLiveProviderIds("opencode", ["native"]);
       const add = vi.spyOn(providersApi, "add");
       try {
-        const { default: App } = await import("@/App");
         renderApp(App);
         await waitFor(() =>
           expect(screen.getByTestId("provider-list").textContent).toContain(
@@ -742,7 +815,6 @@ describe("App integration with MSW", () => {
     });
     setCurrentProviderId("opencode", "native");
     setLiveProviderIds("opencode", ["native-copy"]);
-    const { default: App } = await import("@/App");
     renderApp(App);
     await waitFor(() =>
       expect(screen.getByTestId("provider-list").textContent).toContain(
@@ -774,7 +846,6 @@ describe("App integration with MSW", () => {
     });
     setCurrentProviderId("mcode", "kimi");
 
-    const { default: App } = await import("@/App");
     renderApp(App);
 
     await waitFor(() =>
@@ -822,7 +893,6 @@ describe("App integration with MSW", () => {
       ),
     );
 
-    const { default: App } = await import("@/App");
     renderApp(App);
 
     await waitFor(() =>
@@ -889,7 +959,6 @@ describe("App integration with MSW", () => {
       ),
     );
 
-    const { default: App } = await import("@/App");
     renderApp(App);
 
     await waitFor(() =>
@@ -906,7 +975,9 @@ describe("App integration with MSW", () => {
     await waitFor(() =>
       expect(toastErrorMock).toHaveBeenCalledWith(
         "notifications.removeFromConfigFailed",
-        expect.objectContaining({ description: "kimi.error.defaultModelInUse" }),
+        expect.objectContaining({
+          description: "kimi.error.defaultModelInUse",
+        }),
       ),
     );
     await waitFor(() =>
@@ -941,7 +1012,6 @@ describe("App integration with MSW", () => {
       ),
     );
 
-    const { default: App } = await import("@/App");
     renderApp(App);
 
     await waitFor(() =>
@@ -982,7 +1052,6 @@ describe("App integration with MSW", () => {
       .spyOn(providersApi, "getOpenClawLiveProviderIds")
       .mockRejectedValueOnce(new Error("broken config"));
 
-    const { default: App } = await import("@/App");
     renderApp(App);
 
     fireEvent.click(await sidebarApp("OpenClaw"));
@@ -1010,7 +1079,6 @@ describe("App integration with MSW", () => {
 
   it("renders the Skills page with its own header", async () => {
     localStorage.setItem("cc-switch-last-view", "skills");
-    const { default: App } = await import("@/App");
     renderApp(App);
 
     expect(await screen.findByTestId("unified-skills-panel")).toHaveTextContent(
@@ -1019,7 +1087,6 @@ describe("App integration with MSW", () => {
   });
 
   it("navigates OpenClaw and Hermes pages with underline tabs", async () => {
-    const { default: App } = await import("@/App");
     renderApp(App);
 
     fireEvent.click(await sidebarApp("OpenClaw"));
@@ -1098,7 +1165,6 @@ describe("App integration with MSW", () => {
 
   it("opens the old skillsDiscovery view as the Discover segment", async () => {
     localStorage.setItem("cc-switch-last-view", "skillsDiscovery");
-    const { default: App } = await import("@/App");
     renderApp(App);
 
     expect(await screen.findByTestId("unified-skills-panel")).toHaveTextContent(
@@ -1109,9 +1175,8 @@ describe("App integration with MSW", () => {
   it("shows all eight native resize cursors and restores existing inline styles", async () => {
     windowMocks.isLinux.mockReturnValue(true);
     setSettings({ useAppWindowControls: true });
-    const { default: App } = await import("@/App");
     const { unmount } = renderApp(App);
-    const header = document.querySelector("header")!;
+    const header = await waitForAppHeader();
     header.style.setProperty("cursor", "help", "important");
     const x = window.innerWidth;
     const y = window.innerHeight;
@@ -1165,9 +1230,8 @@ describe("App integration with MSW", () => {
   it("lets the top edge resize before Tauri dragging without blocking inner-header or button events", async () => {
     windowMocks.isLinux.mockReturnValue(true);
     setSettings({ useAppWindowControls: true });
-    const { default: App } = await import("@/App");
     renderApp(App);
-    const header = document.querySelector("header")!;
+    const header = await waitForAppHeader();
     await waitFor(() => {
       fireEvent.mouseMove(header, { clientX: 500, clientY: 1 });
       expect(header.style.cursor).toBe("ns-resize");
@@ -1226,9 +1290,8 @@ describe("App integration with MSW", () => {
   it("clears resize hints and leaves events alone when native resizing is unavailable", async () => {
     windowMocks.isLinux.mockReturnValue(true);
     setSettings({ useAppWindowControls: true });
-    const { default: App } = await import("@/App");
     renderApp(App);
-    const header = document.querySelector("header")!;
+    const header = await waitForAppHeader();
     const moveToEdge = () =>
       fireEvent.mouseMove(header, { clientX: 500, clientY: 1 });
     await waitFor(() => {

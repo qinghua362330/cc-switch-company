@@ -1,0 +1,29 @@
+{
+  "status": "passed",
+  "scope": "synthetic-loopback-desktop-engine",
+  "live_ui_verified": false,
+  "upstream_semantics_verified": false,
+  "tool_history_verified": true,
+  "binary_sha256": "58a91f6ea19bea477ae3a2ec48d619f0039afe75d3476260747e11d201fa7cea",
+  "checks": {
+    "v2_trigger": true,
+    "compaction_output": true,
+    "continuation_uses_compaction": true,
+    "old_assistant_not_repeated": true,
+    "user_history_retained": true,
+    "dummy_auth_only": true,
+    "responses_only": true,
+    "tool_history_before_compaction": true,
+    "old_tool_history_not_repeated": true
+  },
+  "synthetic_tool_call_count": 1,
+  "request_count": 4,
+  "network_policy": "OS sandbox: selected loopback port only",
+  "config_preserved": {
+    "provider_identity": true,
+    "model": true,
+    "capabilities": true,
+    "websocket_settings": true,
+    "storage_settings": true
+  }
+}

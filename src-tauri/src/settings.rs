@@ -483,6 +483,9 @@ pub struct AppSettings {
     /// Enabled by default so Codex app plugins and mobile remote control can keep working.
     #[serde(default = "default_true")]
     pub preserve_codex_official_auth_on_switch: bool,
+    /// Automatically switch login modes based on official ChatGPT quota; enabled by default.
+    #[serde(default = "default_true")]
+    pub codex_quota_auto_fallback: bool,
     #[serde(default = "default_true")]
     pub unify_codex_session_history: bool,
     /// User opted in (via the enable dialog checkbox) to migrate existing
@@ -673,6 +676,7 @@ impl Default for AppSettings {
             native_tray_menu: false,
             // company fork: 切换供应商时保留 Codex 官方 OAuth 登录态(上游默认 false)
             preserve_codex_official_auth_on_switch: true,
+            codex_quota_auto_fallback: true,
             // company fork: 统一 Codex 会话历史(上游默认 false)
             unify_codex_session_history: true,
             unify_codex_migrate_existing: None,
@@ -1705,6 +1709,28 @@ mod tests {
         );
         let default = serde_json::to_value(AppSettings::default()).expect("serialize default");
         assert!(default.get("appOrder").is_none());
+    }
+
+    #[test]
+    fn codex_quota_auto_fallback_defaults_enabled_and_preserves_explicit_false() {
+        let defaults = AppSettings::default();
+        assert!(defaults.codex_quota_auto_fallback);
+
+        let mut serialized = serde_json::to_value(defaults).expect("serialize settings");
+        let removed = serialized
+            .as_object_mut()
+            .expect("settings object")
+            .remove("codexQuotaAutoFallback");
+        assert_eq!(removed, Some(serde_json::json!(true)));
+
+        let missing: AppSettings =
+            serde_json::from_value(serialized.clone()).expect("deserialize missing setting");
+        assert!(missing.codex_quota_auto_fallback);
+
+        serialized["codexQuotaAutoFallback"] = serde_json::json!(false);
+        let disabled: AppSettings =
+            serde_json::from_value(serialized).expect("deserialize explicit false");
+        assert!(!disabled.codex_quota_auto_fallback);
     }
 
     #[test]

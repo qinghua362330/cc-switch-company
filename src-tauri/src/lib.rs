@@ -1442,6 +1442,9 @@ pub fn run() {
                     state.inner().clone(),
                 );
 
+                crate::services::codex_quota_fallback::start(app_handle.clone(), (*state).clone());
+                crate::services::codex_app_refresh::start(app_handle.clone(), (*state).clone());
+
                 // Periodic backup check (on startup)
                 if let Err(e) = state.db.periodic_backup_if_needed() {
                     log::warn!("Periodic backup failed on startup: {e}");

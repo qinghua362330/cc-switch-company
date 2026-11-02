@@ -131,7 +131,7 @@ export function CodexAuthSettings({
     }
   };
 
-  // 设置 → 应用配置 → Codex 卡片里的三行（经典子 agent 开关在 Codex 聚合页签的「聚合设置」里）
+  // 经典子 agent 开关在 Codex 聚合页签的「聚合设置」里。
   return (
     <>
       <SettingsSwitchRow
@@ -140,10 +140,20 @@ export function CodexAuthSettings({
           title: t("settings.preserveCodexOfficialAuthOnSwitch"),
           body: t("settings.preserveCodexOfficialAuthOnSwitchDescription"),
         }}
-        checked={settings.preserveCodexOfficialAuthOnSwitch ?? false}
+        checked={settings.preserveCodexOfficialAuthOnSwitch ?? true}
         onCheckedChange={(value) =>
           onChange({ preserveCodexOfficialAuthOnSwitch: value })
         }
+      />
+
+      <SettingsSwitchRow
+        label={t("settings.codexQuotaAutoFallback")}
+        help={{
+          title: t("settings.codexQuotaAutoFallback"),
+          body: t("settings.codexQuotaAutoFallbackDescription"),
+        }}
+        checked={settings.codexQuotaAutoFallback ?? true}
+        onCheckedChange={(value) => onChange({ codexQuotaAutoFallback: value })}
       />
 
       <SettingsSwitchRow
@@ -152,7 +162,7 @@ export function CodexAuthSettings({
           title: t("settings.unifyCodexSessionHistory"),
           body: t("settings.unifyCodexSessionHistoryDescription"),
         }}
-        checked={settings.unifyCodexSessionHistory ?? false}
+        checked={settings.unifyCodexSessionHistory ?? true}
         onCheckedChange={handleUnifyHistoryChange}
       />
 

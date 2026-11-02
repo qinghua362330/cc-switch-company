@@ -963,5 +963,6 @@ it("previews agy model and masks its key before confirmation", async () => {
     expect(screen.getByText("agy-preview-model")).toBeInTheDocument(),
   );
   expect(screen.queryByText("test-agy")).not.toBeInTheDocument();
-  expect(screen.getAllByText("secr************").length).toBeGreaterThan(0);
+  expect(screen.getByText("****")).toBeInTheDocument();
+  expect(screen.getByText(`test${"*".repeat(20)}`)).toBeInTheDocument();
 });

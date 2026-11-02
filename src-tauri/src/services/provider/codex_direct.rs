@@ -554,6 +554,8 @@ fn row_auth(provider: &Provider) -> Value {
 
 /// 在内存里算好的一次 Codex 写入。
 pub(crate) struct Planned {
+    quota_identity: Option<String>,
+    company_compaction_cleanup: CompanyCompactionCleanup,
     config: CodexConfigPatch,
     /// 第三方路由表的凭据来源：写入时按盘上有没有登录定 `requires_openai_auth`。
     stamp: Option<RouteAuth>,
@@ -574,6 +576,120 @@ impl Planned {
     pub(crate) fn config(&self) -> &CodexConfigPatch {
         &self.config
     }
+}
+
+fn row_capabilities(provider: &Provider) -> Option<Item> {
+    let doc = provider
+        .settings_config
+        .get("config")?
+        .as_str()?
+        .parse::<toml_edit::DocumentMut>()
+        .ok()?;
+    let selector = doc
+        .get("model_provider")
+        .and_then(Item::as_str)
+        .unwrap_or("openai");
+    doc.get("model_providers")?
+        .get(selector)?
+        .get("capabilities")
+        .cloned()
+}
+
+fn is_company_provider(provider: &Provider) -> bool {
+    provider.meta.as_ref().is_some_and(|meta| {
+        meta.provider_type.as_deref() == Some("company_auth")
+            || (meta.provider_type.is_none()
+                && meta.partner_promotion_key.as_deref() == Some("company_pool"))
+    })
+}
+
+fn company_v2_provider(provider: &Provider) -> bool {
+    is_company_provider(provider) && explicitly_supports_v2(provider)
+}
+
+struct CompanyCompactionCleanup(bool);
+
+impl TomlDocPatch for CompanyCompactionCleanup {
+    fn apply_to(
+        &self,
+        _: &std::path::Path,
+        doc: &mut toml_edit::DocumentMut,
+    ) -> Result<(), crate::live::patch::LiveWriteError> {
+        if self.0 {
+            if let Some(features) = doc.get_mut("features").and_then(Item::as_table_like_mut) {
+                features.remove("remote_compaction_v2");
+            }
+        }
+        Ok(())
+    }
+}
+
+fn explicitly_supports_v2(provider: &Provider) -> bool {
+    row_capabilities(provider)
+        .and_then(|capabilities| {
+            capabilities
+                .get("remote_compaction")
+                .and_then(Item::as_str)
+                .map(str::to_owned)
+        })
+        .as_deref()
+        == Some("v2")
+}
+
+// Codex dispatches compaction by provider, not by the selected Stack model.
+// A company V2 opt-in therefore needs an explicit capability on every route.
+fn constrain_stack_compaction(
+    target: &Target<'_>,
+    live_route: &mut RouteWrite,
+) -> Result<(), AppError> {
+    let Target::Proxy { route, stack, .. } = target else {
+        return Ok(());
+    };
+    if stack.is_empty()
+        || !std::iter::once(*route)
+            .chain(stack.iter().map(|member| &member.provider))
+            .any(company_v2_provider)
+    {
+        return Ok(());
+    }
+    let capability = if std::iter::once(*route)
+        .chain(stack.iter().map(|member| &member.provider))
+        .all(explicitly_supports_v2)
+    {
+        "v2"
+    } else {
+        "unsupported"
+    };
+
+    if let RouteWrite::OfficialProxy { base_url, unified } = live_route {
+        if !*unified {
+            if capability == "v2" {
+                return Ok(());
+            }
+            return Err(AppError::Message(
+                "公司 V2 Stack 无法在内置 OpenAI 路由下安全限定压缩能力；请改用专用 V2 直连卡，或启用统一会话镜像后重试。".into(),
+            ));
+        }
+        // Same selector, URL and official auth semantics; only add capabilities.
+        let mut table = official_mirror_table(Some(base_url), false);
+        if let Some(capabilities) = row_capabilities(route) {
+            table.insert("capabilities", capabilities);
+        }
+        *live_route = RouteWrite::Custom(table);
+    }
+    if let RouteWrite::Custom(table) = live_route {
+        if !table.contains_key("capabilities") {
+            table.insert("capabilities", Item::Table(Table::new()));
+        }
+        let capabilities = table
+            .get_mut("capabilities")
+            .and_then(Item::as_table_like_mut)
+            .ok_or_else(|| {
+                AppError::Message("Codex provider capabilities must be a table".into())
+            })?;
+        capabilities.insert("remote_compaction", toml_edit::value(capability));
+    }
+    Ok(())
 }
 
 /// 算出写入内容；行有问题（比如会把官方登录发给第三方）就在这里报错，什么都不写。
@@ -598,7 +714,7 @@ pub(crate) fn plan(
 
     let official = provider.is_some_and(is_official);
     let managed_login = prepared.target_login.as_ref().map(|(_, auth)| auth.clone());
-    let (route, stamp, auth) = match (target, &projection) {
+    let (mut route, stamp, auth) = match (target, &projection) {
         (Target::Direct(None), _) | (_, None) => (RouteWrite::Default, None, AuthGoal::KeepNative),
         (Target::Direct(Some(provider)), Some(projection)) => {
             let auth = match &managed_login {
@@ -659,13 +775,8 @@ pub(crate) fn plan(
                     if table.get("name").and_then(Item::as_str) == Some("OpenAI") {
                         proxy_table.insert("name", toml_edit::value("OpenAI"));
                     }
-                    if let Some(compaction) = table
-                        .get("capabilities")
-                        .and_then(|capabilities| capabilities.get("remote_compaction"))
-                    {
-                        let mut capabilities = Table::new();
-                        capabilities.insert("remote_compaction", compaction.clone());
-                        proxy_table.insert("capabilities", Item::Table(capabilities));
+                    if let Some(capabilities) = table.get("capabilities") {
+                        proxy_table.insert("capabilities", capabilities.clone());
                     }
                     // 重试次数和流空闲超时是 Codex 客户端自己的行为（对本地路由同样生效），
                     // 照搬行里的值；旧版接管只改地址，这几个键一直留着（#8265）。
@@ -683,6 +794,7 @@ pub(crate) fn plan(
             }
         }
     };
+    constrain_stack_compaction(target, &mut route)?;
 
     let stack = match target {
         Target::Proxy { stack, .. } => *stack,
@@ -758,6 +870,27 @@ pub(crate) fn plan(
         official_login.as_deref(),
     );
     Ok(Planned {
+        company_compaction_cleanup: CompanyCompactionCleanup(
+            provider.is_some_and(is_company_provider),
+        ),
+        quota_identity: match target {
+            Target::Direct(provider) => provider.map(|p| p.id.clone()),
+            Target::Proxy {
+                route,
+                base_url,
+                stack,
+            } => {
+                let catalog_value = catalog
+                    .as_deref()
+                    .and_then(|bytes| serde_json::from_slice(bytes).ok());
+                crate::services::codex_quota_fallback::proxy_identity(
+                    route,
+                    base_url,
+                    stack,
+                    catalog_value.as_ref(),
+                )
+            }
+        },
         config,
         stamp,
         catalog,
@@ -1037,7 +1170,7 @@ fn contract_of(
         .iter()
         .map(|(path, value)| serde_json::json!([path.join("."), value_text(value)]))
         .collect();
-    let parts = serde_json::json!({
+    let mut parts = serde_json::json!({
         "app": "codex",
         "version": CONTRACT_VERSION,
         "url": base_url,
@@ -1050,6 +1183,9 @@ fn contract_of(
         "managed": prepared.target_login.as_ref().map(|(account, _)| account),
         "login": official_login,
     });
+    if target_provider(target).is_some_and(is_company_provider) {
+        parts["company_compaction_cleanup"] = Value::Bool(true);
+    }
     let key = digest(Some(
         &serde_json::to_vec(&parts).expect("contract parts serialize"),
     ))
@@ -1268,11 +1404,16 @@ pub(crate) fn run_with_edits(
         .transpose()?;
     let catalog_patch = planned.catalog.map(WholeFile::Write);
     // 先应用编辑器里的全局改动（有的话），再换关键字段。
-    let mut config_steps: Vec<&dyn TomlDocPatch> = Vec::new();
+    let quota_cleanup = crate::services::codex_quota_fallback::projection(None, true);
+    let quota_overlay =
+        crate::services::codex_quota_fallback::projection(planned.quota_identity, false);
+    let mut config_steps: Vec<&dyn TomlDocPatch> = vec![&quota_cleanup];
     if let Some(edits) = edits {
         config_steps.push(edits);
     }
+    config_steps.push(&planned.company_compaction_cleanup);
     config_steps.push(&config);
+    config_steps.push(&quota_overlay);
     let config_patch = TomlSteps(config_steps);
 
     let mut changes: Vec<FileChange<'_>> = Vec::new();
@@ -1307,6 +1448,9 @@ pub(crate) fn run_with_edits(
     }
 
     let report = write.run(op, &changes, pending);
+    if report.is_ok() {
+        crate::services::codex_quota_fallback::projection_committed();
+    }
     // 按磁盘上的实际内容记新启动的 Codex 会读到的目录：失败时可能已经发布了一部分。
     super::codex_client_catalog::observe(store);
     report
@@ -1335,8 +1479,302 @@ pub(crate) fn preflight(db: &Database, provider: &Provider) -> Result<(), AppErr
 
 #[cfg(test)]
 mod tests {
-    use super::{is_proxy_base_url, stack_subagent_nested};
+    use super::*;
     use serde_json::json;
+
+    fn compaction_provider(id: &str, company: bool, capability: Option<&str>) -> Provider {
+        let capability = capability
+            .map(|value| format!("remote_compaction = \"{value}\"\n"))
+            .unwrap_or_default();
+        let mut provider = Provider::with_id(
+            id.into(),
+            id.into(),
+            json!({"auth": {"OPENAI_API_KEY": "fixture-key"}, "config": format!(
+                "model_provider = \"vendor-id\"\nmodel = \"gpt-5.6-sol\"\n[model_providers.vendor-id]\nname = \"Company\"\nbase_url = \"https://fixture.invalid/v1\"\nwire_api = \"responses\"\n[model_providers.vendor-id.capabilities]\n{capability}unrelated = true\n[model_providers.unselected.capabilities]\nremote_compaction = \"v2\"\n"
+            )}),
+            None,
+        );
+        if company {
+            provider.meta = Some(crate::provider::ProviderMeta {
+                provider_type: Some("company_auth".into()),
+                ..Default::default()
+            });
+        }
+        provider
+    }
+
+    fn compaction_member(provider: Provider) -> Member {
+        Member {
+            key: "member".into(),
+            provider,
+            route: false,
+            model_ids: vec!["gpt-5.6-sol".into()],
+        }
+    }
+
+    fn proxy_compaction_patch(route: &Provider, stack: &[Member]) -> RouteWrite {
+        let projection = project(route).unwrap();
+        let Route::Custom { table, .. } = projection.route else {
+            panic!("custom fixture")
+        };
+        let mut live = RouteWrite::Custom(table);
+        constrain_stack_compaction(
+            &Target::Proxy {
+                route,
+                base_url: "http://127.0.0.1:15721/v1",
+                stack,
+            },
+            &mut live,
+        )
+        .unwrap();
+        live
+    }
+
+    fn effective_compaction(route: &RouteWrite) -> Option<&str> {
+        let RouteWrite::Custom(table) = route else {
+            return None;
+        };
+        table
+            .get("capabilities")?
+            .get("remote_compaction")?
+            .as_str()
+    }
+
+    #[test]
+    fn company_stack_compaction_requires_explicit_v2_on_every_route() {
+        for (route_company, route_cap, member_company, member_cap, expected) in [
+            (true, Some("v2"), false, None, Some("unsupported")),
+            (false, None, true, Some("v2"), Some("unsupported")),
+            (
+                true,
+                Some("v2"),
+                false,
+                Some("unsupported"),
+                Some("unsupported"),
+            ),
+            (true, Some("v2"), false, Some("v2"), Some("v2")),
+            (false, Some("v2"), true, Some("v2"), Some("v2")),
+            (false, Some("v2"), false, None, Some("v2")),
+            (true, None, false, Some("v2"), None),
+        ] {
+            let route = compaction_provider("route", route_company, route_cap);
+            let members = [compaction_member(compaction_provider(
+                "member",
+                member_company,
+                member_cap,
+            ))];
+            let live = proxy_compaction_patch(&route, &members);
+            assert_eq!(effective_compaction(&live), expected);
+            let RouteWrite::Custom(table) = live else {
+                unreachable!()
+            };
+            assert_eq!(table["capabilities"]["unrelated"].as_bool(), Some(true));
+        }
+        let company = compaction_provider("company", true, Some("v2"));
+        assert_eq!(
+            effective_compaction(&proxy_compaction_patch(&company, &[])),
+            Some("v2")
+        );
+        let mut direct = RouteWrite::Default;
+        constrain_stack_compaction(&Target::Direct(Some(&company)), &mut direct).unwrap();
+        assert!(matches!(direct, RouteWrite::Default));
+
+        let mut inline = company.clone();
+        inline.settings_config["config"] = json!(
+            "model_provider = \"inline-provider\"\nmodel_providers = { inline-provider = { name = \"Company\", base_url = \"https://fixture.invalid/v1\", wire_api = \"responses\", capabilities = { remote_compaction = \"v2\", unrelated = true } } }\n"
+        );
+        let members = [compaction_member(compaction_provider("mixed", false, None))];
+        let live = proxy_compaction_patch(&inline, &members);
+        assert_eq!(effective_compaction(&live), Some("unsupported"));
+        let RouteWrite::Custom(table) = live else {
+            unreachable!()
+        };
+        assert_eq!(table["capabilities"]["unrelated"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn company_stack_compaction_official_builtin_fails_before_projection() {
+        let mut official = compaction_provider("official", false, None);
+        official.category = Some("official".into());
+        let members = [compaction_member(compaction_provider(
+            "company",
+            true,
+            Some("v2"),
+        ))];
+        let target = Target::Proxy {
+            route: &official,
+            base_url: "http://127.0.0.1:15721/v1",
+            stack: &members,
+        };
+        let mut builtin = RouteWrite::OfficialProxy {
+            base_url: "http://127.0.0.1:15721/v1".into(),
+            unified: false,
+        };
+        let error = constrain_stack_compaction(&target, &mut builtin)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("V2"));
+        assert!(error.contains("统一会话镜像"));
+        assert!(matches!(
+            builtin,
+            RouteWrite::OfficialProxy { unified: false, .. }
+        ));
+        let mut verified_official = compaction_provider("official", false, Some("v2"));
+        verified_official.category = Some("official".into());
+        constrain_stack_compaction(
+            &Target::Proxy {
+                route: &verified_official,
+                base_url: "http://127.0.0.1:15721/v1",
+                stack: &members,
+            },
+            &mut builtin,
+        )
+        .unwrap();
+        assert!(matches!(
+            builtin,
+            RouteWrite::OfficialProxy { unified: false, .. }
+        ));
+        let mut mirror = RouteWrite::OfficialProxy {
+            base_url: "http://127.0.0.1:15721/v1".into(),
+            unified: true,
+        };
+        constrain_stack_compaction(&target, &mut mirror).unwrap();
+        assert_eq!(effective_compaction(&mirror), Some("unsupported"));
+        let RouteWrite::Custom(table) = mirror else {
+            unreachable!()
+        };
+        assert_eq!(table["name"].as_str(), Some("OpenAI"));
+        assert!(table.get("experimental_bearer_token").is_none());
+        assert_eq!(table["requires_openai_auth"].as_bool(), Some(true));
+        let original_members = [compaction_member(compaction_provider(
+            "company", true, None,
+        ))];
+        constrain_stack_compaction(
+            &Target::Proxy {
+                route: &official,
+                base_url: "http://127.0.0.1:15721/v1",
+                stack: &original_members,
+            },
+            &mut builtin,
+        )
+        .unwrap();
+        assert!(matches!(
+            builtin,
+            RouteWrite::OfficialProxy { unified: false, .. }
+        ));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn company_stack_compaction_transaction_preserves_db_and_other_live_capabilities() {
+        let db = Database::memory().unwrap();
+        let company = compaction_provider("company-row-id", true, Some("v2"));
+        let other = compaction_provider("other", false, None);
+        db.save_provider("codex", &company).unwrap();
+        db.save_provider("codex", &other).unwrap();
+        let rows_before = db.get_all_providers("codex").unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("config.toml");
+        let auth_path = home.path().join("auth.json");
+        std::fs::write(&auth_path, b"native-login-fixture").unwrap();
+        let store = DeviceStore::at(home.path().join("state"));
+        let guard = crate::live::engine::lock_app("codex");
+        for features in [
+            "[features]\nremote_compaction_v2 = false\nkeep_feature = true\n",
+            "features = { remote_compaction_v2 = false, keep_feature = true }\n",
+        ] {
+            std::fs::write(&path, features).unwrap();
+            for (members, expected) in [
+                (vec![compaction_member(other.clone())], "unsupported"),
+                (
+                    vec![compaction_member(compaction_provider(
+                        "verified",
+                        false,
+                        Some("v2"),
+                    ))],
+                    "v2",
+                ),
+            ] {
+                let planned = plan(
+                    &db,
+                    &Owner::None,
+                    &Target::Proxy {
+                        route: &company,
+                        base_url: "http://127.0.0.1:15721/v1",
+                        stack: &members,
+                    },
+                    &Prepared::default(),
+                )
+                .unwrap();
+                let steps = TomlSteps(vec![&planned.company_compaction_cleanup, &planned.config]);
+                crate::mode::operation::run(
+                    &store,
+                    &guard,
+                    "compaction-test",
+                    &[FileChange {
+                        file: LiveFile::private(&path),
+                        patch: &steps,
+                    }],
+                    PendingTarget::default(),
+                    &|_| Ok(()),
+                )
+                .unwrap();
+                let live = std::fs::read_to_string(&path)
+                    .unwrap()
+                    .parse::<toml_edit::DocumentMut>()
+                    .unwrap();
+                assert_eq!(live["model_provider"].as_str(), Some(ROUTE_ID));
+                assert_eq!(
+                    live["model_providers"][ROUTE_ID]["capabilities"]["remote_compaction"].as_str(),
+                    Some(expected)
+                );
+                assert_eq!(
+                    live["model_providers"][ROUTE_ID]["capabilities"]["unrelated"].as_bool(),
+                    Some(true)
+                );
+                assert!(live["features"].get("remote_compaction_v2").is_none());
+                assert_eq!(live["features"]["keep_feature"].as_bool(), Some(true));
+                assert!(live["model_providers"].get("company-row-id").is_none());
+            }
+            for provider in [&company, &other] {
+                std::fs::write(&path, features).unwrap();
+                let planned = plan(
+                    &db,
+                    &Owner::None,
+                    &Target::Direct(Some(provider)),
+                    &Prepared::default(),
+                )
+                .unwrap();
+                let steps = TomlSteps(vec![&planned.company_compaction_cleanup, &planned.config]);
+                crate::mode::operation::run(
+                    &store,
+                    &guard,
+                    "compaction-direct-test",
+                    &[FileChange {
+                        file: LiveFile::private(&path),
+                        patch: &steps,
+                    }],
+                    PendingTarget::default(),
+                    &|_| Ok(()),
+                )
+                .unwrap();
+                let live = std::fs::read_to_string(&path)
+                    .unwrap()
+                    .parse::<toml_edit::DocumentMut>()
+                    .unwrap();
+                assert_eq!(
+                    live["features"].get("remote_compaction_v2").is_none(),
+                    is_company_provider(provider)
+                );
+                assert_eq!(live["features"]["keep_feature"].as_bool(), Some(true));
+            }
+        }
+        assert_eq!(std::fs::read(&auth_path).unwrap(), b"native-login-fixture");
+        let rows_after = db.get_all_providers("codex").unwrap();
+        for (id, before) in rows_before {
+            assert_eq!(rows_after[&id].settings_config, before.settings_config);
+        }
+    }
 
     /// 子代理设置按合并目录校验：不在目录里、或者父 agent 用新版工具时会拒收的
     /// （`multi_agent_version = "disabled"`）都不写；强度不在档位里只写模型。

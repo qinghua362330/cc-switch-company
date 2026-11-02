@@ -458,7 +458,9 @@ async fn write_proxy(
                 .await
                 .map_err(err)?;
             let planned = codex_direct::plan(&state.db, &owner, &spec, &prepared).map_err(err)?;
-            let unchanged = !force && live_now.has_contract(&planned.contract.key);
+            let unchanged = !force
+                && !crate::services::codex_quota_fallback::needs_projection()
+                && live_now.has_contract(&planned.contract.key);
             target.contract = Some(planned.contract.clone());
             let pending = pending(target);
             if unchanged {

@@ -123,6 +123,21 @@ fn sync_company_providers(
         active_ids.insert((app_type.as_str().to_string(), provider.id.clone()));
         upsert_company_provider(state, app_type, provider)?;
         synced += 1;
+        if let Some(compaction_entry) = company_compaction_entry(entry, &login.base_url) {
+            let (app_type, provider) =
+                company_catalog_provider(&compaction_entry, login, created_at)
+                    .expect("derived Codex catalog entry");
+            if entry.models.iter().any(|m| m != VERIFIED_COMPACTION_MODEL)
+                || state
+                    .db
+                    .get_provider_by_id(&provider.id, app_type.as_str())?
+                    .is_some()
+            {
+                active_ids.insert((app_type.as_str().to_string(), provider.id.clone()));
+                upsert_company_provider(state, app_type, provider)?;
+                synced += 1;
+            }
+        }
     }
 
     // Keep stale rows (including current/live and Stack members) and their CLI
@@ -150,6 +165,40 @@ fn sync_company_providers(
 }
 
 const STALE_COMPANY_NOTE: &str = "已从公司目录移除（保留本地配置）";
+const VERIFIED_COMPACTION_MODEL: &str = "gpt-5.6-sol";
+
+fn verified_compaction_base(base: &str) -> bool {
+    url::Url::parse(base).is_ok_and(|url| {
+        url.scheme() == "https"
+            && url.host_str() == Some("leharrt.com")
+            && url.port_or_known_default() == Some(443)
+            && matches!(url.path().trim_end_matches('/'), "" | "/v1")
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+    })
+}
+
+fn company_compaction_entry(entry: &CatalogEntry, base: &str) -> Option<CatalogEntry> {
+    if !matches!(
+        entry.tool.trim().to_ascii_lowercase().as_str(),
+        "codex" | "openai-codex" | "openai_codex"
+    ) || !entry.protocol.eq_ignore_ascii_case("openai-responses")
+        || !verified_compaction_base(base)
+        || !entry.models.iter().any(|m| m == VERIFIED_COMPACTION_MODEL)
+    {
+        return None;
+    }
+    let mut derived = entry.clone();
+    derived.label = format!("{} · 远程压缩 V2", entry.label);
+    derived.models = vec![VERIFIED_COMPACTION_MODEL.to_string()];
+    derived.default_model = VERIFIED_COMPACTION_MODEL.to_string();
+    if let Some(caps) = derived.model_capabilities.as_mut() {
+        caps.retain(|model, _| model == VERIFIED_COMPACTION_MODEL);
+    }
+    Some(derived)
+}
 
 fn is_company_provider(provider: &Provider) -> bool {
     provider.meta.as_ref().is_some_and(|meta| {
@@ -175,8 +224,98 @@ fn upsert_company_provider(
             ));
         }
         // Keep card ordering, creation time, user notes and unrelated metadata.
+        let old_config = existing
+            .settings_config
+            .get("config")
+            .and_then(Value::as_str)
+            .and_then(|text| text.parse::<DocumentMut>().ok());
+        let preserve_disabled_websocket = matches!(app_type, AppType::Codex)
+            && existing
+                .settings_config
+                .get("config")
+                .and_then(Value::as_str)
+                .and_then(|text| text.parse::<DocumentMut>().ok())
+                .is_some_and(|doc| {
+                    let name = doc
+                        .get("model_provider")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("custom");
+                    doc.get("model_providers")
+                        .and_then(|v| v.as_table_like())
+                        .and_then(|v| v.get(name))
+                        .and_then(|v| v.as_table_like())
+                        .and_then(|v| v.get("supports_websockets"))
+                        .or_else(|| doc.get("supports_websockets"))
+                        .and_then(|v| v.as_bool())
+                        == Some(false)
+                });
         existing.name = provider.name;
         existing.settings_config = provider.settings_config;
+        if preserve_disabled_websocket {
+            if let Some(config) = existing
+                .settings_config
+                .get("config")
+                .and_then(Value::as_str)
+            {
+                if let Ok(mut doc) = config.parse::<DocumentMut>() {
+                    doc["model_providers"]["custom"]["supports_websockets"] =
+                        toml_edit::value(false);
+                    existing.settings_config["config"] = Value::String(doc.to_string());
+                }
+            }
+        }
+        if matches!(app_type, AppType::Codex) {
+            if let (Some(old), Some(new_text)) = (
+                old_config,
+                existing
+                    .settings_config
+                    .get("config")
+                    .and_then(Value::as_str),
+            ) {
+                if let Ok(mut new) = new_text.parse::<DocumentMut>() {
+                    if let Some(features) = old.get("features").and_then(|v| v.as_table_like()) {
+                        let mut retained = toml_edit::Table::new();
+                        for (key, value) in features
+                            .iter()
+                            .filter(|(key, _)| *key != "remote_compaction_v2")
+                        {
+                            retained.insert(key, value.clone());
+                        }
+                        if !retained.is_empty() {
+                            new["features"] = toml_edit::Item::Table(retained);
+                        }
+                    }
+                    let old_name = old
+                        .get("model_provider")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("custom");
+                    if let Some(caps) = old
+                        .get("model_providers")
+                        .and_then(|v| v.get(old_name))
+                        .and_then(|v| v.get("capabilities"))
+                        .and_then(|v| v.as_table_like())
+                    {
+                        for (key, value) in caps.iter() {
+                            if new
+                                .get("model_providers")
+                                .and_then(|v| v.get("custom"))
+                                .and_then(|v| v.get("capabilities"))
+                                .and_then(|v| v.get(key))
+                                .is_none()
+                            {
+                                new["model_providers"]["custom"]["capabilities"][key] =
+                                    if key == "remote_compaction" {
+                                        toml_edit::value("unsupported")
+                                    } else {
+                                        value.clone()
+                                    };
+                            }
+                        }
+                    }
+                    existing.settings_config["config"] = Value::String(new.to_string());
+                }
+            }
+        }
         existing.website_url = provider.website_url;
         if let Some(notes) = existing.notes.as_mut() {
             *notes = notes
@@ -295,11 +434,10 @@ fn company_codex_settings(entry: &CatalogEntry, login: &LoginResponse) -> Value 
             row
         })
         .collect();
-    let config = format!(
+    let mut config = format!(
         "model_provider = \"custom\"\n\
          model = {}\n\
          model_reasoning_effort = \"high\"\n\
-         disable_response_storage = false\n\
          experimental_realtime_webrtc_call_base_url = {}\n\
          experimental_realtime_ws_base_url = {}\n\
          \n\
@@ -314,6 +452,17 @@ fn company_codex_settings(entry: &CatalogEntry, login: &LoginResponse) -> Value 
         toml_string(&entry.label),
         toml_string(&base_url)
     );
+    if entry.protocol.eq_ignore_ascii_case("openai-responses")
+        && verified_compaction_base(&login.base_url)
+        && entry.default_model == VERIFIED_COMPACTION_MODEL
+        && !entry.models.is_empty()
+        && entry
+            .models
+            .iter()
+            .all(|model| model == VERIFIED_COMPACTION_MODEL)
+    {
+        config.push_str("\n[model_providers.custom.capabilities]\nremote_compaction = \"v2\"\n");
+    }
 
     json!({
         "auth": {
@@ -373,7 +522,51 @@ pub fn normalize_company_codex_providers(
             .get("config")
             .and_then(|value| value.as_str())
         {
-            let normalized = normalize_company_codex_config_text(config_text);
+            let mut normalized = normalize_company_codex_config_text(config_text);
+            if let Ok(mut doc) = normalized.parse::<DocumentMut>() {
+                let name = doc
+                    .get("model_provider")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("custom")
+                    .to_string();
+                let base = doc
+                    .get("model_providers")
+                    .and_then(|v| v.get(&name))
+                    .and_then(|v| v.get("base_url"))
+                    .and_then(|v| v.as_str());
+                let models = provider
+                    .settings_config
+                    .get("modelCatalog")
+                    .and_then(|v| v.get("models"))
+                    .and_then(Value::as_array);
+                let supported = provider.meta.as_ref().and_then(|m| m.api_format.as_deref())
+                    == Some("openai_responses")
+                    && crate::live::project::codex::foreign_catalog(&doc).is_none()
+                    && base.is_some_and(verified_compaction_base)
+                    && doc.get("model").and_then(|v| v.as_str()) == Some(VERIFIED_COMPACTION_MODEL)
+                    && models.is_some_and(|rows| {
+                        !rows.is_empty()
+                            && rows.iter().all(|v| {
+                                v.get("model").and_then(Value::as_str)
+                                    == Some(VERIFIED_COMPACTION_MODEL)
+                            })
+                    });
+                if supported {
+                    doc["model_providers"][&name]["capabilities"]["remote_compaction"] =
+                        toml_edit::value("v2");
+                    normalized = doc.to_string();
+                } else if doc
+                    .get("model_providers")
+                    .and_then(|v| v.get(&name))
+                    .and_then(|v| v.get("capabilities"))
+                    .and_then(|v| v.get("remote_compaction"))
+                    .is_some()
+                {
+                    doc["model_providers"][&name]["capabilities"]["remote_compaction"] =
+                        toml_edit::value("unsupported");
+                    normalized = doc.to_string();
+                }
+            }
             if normalized != config_text {
                 if let Some(obj) = provider.settings_config.as_object_mut() {
                     obj.insert("config".to_string(), Value::String(normalized));
@@ -401,7 +594,7 @@ fn normalize_company_codex_config_text(config_text: &str) -> String {
             );
         fallback = remove_config_key_lines(&fallback, &["disable_response_storage"]);
         fallback = remove_true_config_key_lines(&fallback, "supports_websockets");
-        let mut additions = String::from("disable_response_storage = false\n");
+        let mut additions = String::new();
         if let Some(base_url) = extract_codex_base_url_from_text(&fallback) {
             if !fallback.contains("experimental_realtime_webrtc_call_base_url") {
                 additions.push_str(&format!(
@@ -428,15 +621,18 @@ fn normalize_company_codex_config_text(config_text: &str) -> String {
 
     let realtime_base_url = doc
         .get("model_providers")
-        .and_then(|item| item.as_table())
+        .and_then(|item| item.as_table_like())
         .and_then(|table| table.get(&provider_name))
-        .and_then(|item| item.as_table())
+        .and_then(|item| item.as_table_like())
         .and_then(|table| table.get("base_url"))
         .and_then(|item| item.as_str())
         .or_else(|| doc.get("base_url").and_then(|item| item.as_str()))
         .map(codex_responses_base_url);
 
-    doc["disable_response_storage"] = toml_edit::value(false);
+    doc.as_table_mut().remove("disable_response_storage");
+    if let Some(features) = doc.get_mut("features").and_then(|v| v.as_table_like_mut()) {
+        features.remove("remote_compaction_v2");
+    }
     if let Some(base_url) = realtime_base_url {
         doc["experimental_realtime_webrtc_call_base_url"] = toml_edit::value(base_url.clone());
         doc["experimental_realtime_ws_base_url"] = toml_edit::value(base_url);
@@ -444,12 +640,12 @@ fn normalize_company_codex_config_text(config_text: &str) -> String {
 
     if let Some(table) = doc
         .get_mut("model_providers")
-        .and_then(|item| item.as_table_mut())
+        .and_then(|item| item.as_table_like_mut())
         .and_then(|table| table.get_mut(&provider_name))
-        .and_then(|item| item.as_table_mut())
+        .and_then(|item| item.as_table_like_mut())
     {
-        table["wire_api"] = toml_edit::value("responses");
-        table["requires_openai_auth"] = toml_edit::value(true);
+        table.insert("wire_api", toml_edit::value("responses"));
+        table.insert("requires_openai_auth", toml_edit::value(true));
         if table
             .get("supports_websockets")
             .and_then(|item| item.as_bool())
@@ -458,9 +654,17 @@ fn normalize_company_codex_config_text(config_text: &str) -> String {
             table.remove("supports_websockets");
         }
         if let Some(base_url) = table.get("base_url").and_then(|item| item.as_str()) {
-            table["base_url"] = toml_edit::value(codex_responses_base_url(base_url));
+            let base_url = codex_responses_base_url(base_url);
+            table.insert("base_url", toml_edit::value(base_url));
         }
     } else {
+        if doc
+            .get("supports_websockets")
+            .and_then(|item| item.as_bool())
+            == Some(true)
+        {
+            doc.as_table_mut().remove("supports_websockets");
+        }
         doc["wire_api"] = toml_edit::value("responses");
         doc["requires_openai_auth"] = toml_edit::value(true);
         if let Some(base_url) = doc.get("base_url").and_then(|item| item.as_str()) {
@@ -492,7 +696,8 @@ fn remove_true_config_key_lines(config_text: &str, key_to_remove: &str) -> Strin
             let Some((key, value)) = trimmed.split_once('=') else {
                 return true;
             };
-            !(key.trim() == key_to_remove && value.trim() == "true")
+            let value = value.split('#').next().unwrap_or(value).trim();
+            !(key.trim() == key_to_remove && value == "true")
         })
         .collect()
 }
@@ -898,7 +1103,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_company_codex_config_disables_response_storage_without_forcing_websocket() {
+    fn generated_company_codex_config_uses_default_storage_without_forcing_websocket() {
         let value = company_codex_settings(&sample_entry(), &sample_login());
         let config = value
             .get("config")
@@ -908,12 +1113,7 @@ mod tests {
             .parse::<DocumentMut>()
             .expect("generated config must be valid TOML");
 
-        assert_eq!(
-            document
-                .get("disable_response_storage")
-                .and_then(|item| item.as_bool()),
-            Some(false)
-        );
+        assert!(document.get("disable_response_storage").is_none());
         assert_eq!(
             document
                 .get("experimental_realtime_webrtc_call_base_url")
@@ -954,12 +1154,7 @@ base_url = "https://leharrt.com"
             .parse::<DocumentMut>()
             .expect("normalized config must be valid TOML");
 
-        assert_eq!(
-            document
-                .get("disable_response_storage")
-                .and_then(|item| item.as_bool()),
-            Some(false)
-        );
+        assert!(document.get("disable_response_storage").is_none());
         assert_eq!(
             document
                 .get("experimental_realtime_webrtc_call_base_url")
@@ -985,6 +1180,411 @@ base_url = "https://leharrt.com"
             .expect("custom provider table")
             .get("supports_websockets")
             .is_none());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn company_catalog_refresh_cleans_legacy_transport_in_database_and_live_config() {
+        for websocket in [true, false] {
+            let _home = IsolatedHome::new();
+            let state = test_state();
+            let login = sample_login();
+            let (_, mut provider) = company_catalog_provider(&sample_entry(), &login, 1).unwrap();
+            let mut doc = provider.settings_config["config"]
+                .as_str()
+                .unwrap()
+                .parse::<DocumentMut>()
+                .unwrap();
+            doc["disable_response_storage"] = toml_edit::value(false);
+            doc["model_providers"]["custom"]["supports_websockets"] = toml_edit::value(websocket);
+            provider.settings_config["config"] = Value::String(doc.to_string());
+            state.db.save_provider("codex", &provider).unwrap();
+            ProviderService::switch(&state, AppType::Codex, &provider.id).unwrap();
+            sync_company_providers(&state, &login).unwrap();
+            let refreshed = state
+                .db
+                .get_provider_by_id(&provider.id, "codex")
+                .unwrap()
+                .unwrap();
+            let live =
+                std::fs::read_to_string(crate::codex_config::get_codex_config_path()).unwrap();
+            for config in [
+                refreshed.settings_config["config"].as_str().unwrap(),
+                live.as_str(),
+            ] {
+                let doc = config.parse::<DocumentMut>().unwrap();
+                assert!(doc.get("disable_response_storage").is_none());
+                assert_eq!(
+                    doc["model_providers"]["custom"]
+                        .as_table_like()
+                        .unwrap()
+                        .get("supports_websockets")
+                        .and_then(|v| v.as_bool()),
+                    if websocket { None } else { Some(false) }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn company_v2_generation_is_limited_to_verified_route_and_model() {
+        let mut entry = sample_entry();
+        entry.default_model = VERIFIED_COMPACTION_MODEL.into();
+        entry.models = vec![VERIFIED_COMPACTION_MODEL.into()];
+        let login = sample_login();
+        let settings = company_codex_settings(&entry, &login);
+        let text = settings["config"].as_str().unwrap();
+        let doc = text.parse::<DocumentMut>().unwrap();
+        assert_eq!(
+            doc["model_providers"]["custom"]["name"].as_str(),
+            Some(entry.label.as_str())
+        );
+        assert_eq!(
+            doc["model_providers"]["custom"]["capabilities"]["remote_compaction"].as_str(),
+            Some("v2")
+        );
+        assert!(!text.contains("disable_response_storage"));
+        assert!(!text.contains("supports_websockets"));
+        if let Some(path) = std::env::var_os("CC_SWITCH_COMPACTION_FIXTURE_OUTPUT") {
+            // Synthetic config only, never export real provider credentials.
+            std::fs::write(path, text).unwrap();
+        }
+        for base in [
+            "https://other.example/v1",
+            "http://leharrt.com",
+            "https://leharrt.com/other",
+            "https://leharrt.com:444/v1",
+        ] {
+            let other = LoginResponse {
+                base_url: base.into(),
+                ..login.clone()
+            };
+            assert!(!company_codex_settings(&entry, &other)["config"]
+                .as_str()
+                .unwrap()
+                .contains("remote_compaction"));
+        }
+        entry.models.push("deepseek-v4-pro".into());
+        assert!(!company_codex_settings(&entry, &login)["config"]
+            .as_str()
+            .unwrap()
+            .contains("remote_compaction"));
+        entry.models = vec![VERIFIED_COMPACTION_MODEL.into()];
+        entry.protocol = "openai-chat".into();
+        assert!(!company_codex_settings(&entry, &login)["config"]
+            .as_str()
+            .unwrap()
+            .contains("remote_compaction"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn company_v2_refresh_preserves_mixed_card_selection_and_projects_dedicated_card() {
+        let _home = IsolatedHome::new();
+        let state = test_state();
+        let mut login = sample_login();
+        login.catalog[0]
+            .models
+            .push(VERIFIED_COMPACTION_MODEL.into());
+        login.catalog[0].models.push("deepseek-v4-pro".into());
+        let (_, mixed) = company_catalog_provider(&login.catalog[0], &login, 1).unwrap();
+        state.db.save_provider("codex", &mixed).unwrap();
+        ProviderService::switch(&state, AppType::Codex, &mixed.id).unwrap();
+        let result = sync_company_providers(&state, &login).unwrap();
+        assert_eq!(result.synced, 2);
+        assert_eq!(
+            ProviderService::current(&state, AppType::Codex).unwrap(),
+            mixed.id
+        );
+        let derived_entry = company_compaction_entry(&login.catalog[0], &login.base_url).unwrap();
+        let (_, derived) = company_catalog_provider(&derived_entry, &login, 1).unwrap();
+        let original = state
+            .db
+            .get_provider_by_id(&mixed.id, "codex")
+            .unwrap()
+            .unwrap();
+        assert!(!original.settings_config["config"]
+            .as_str()
+            .unwrap()
+            .contains("remote_compaction"));
+        ProviderService::switch(&state, AppType::Codex, &derived.id).unwrap();
+        sync_company_providers(&state, &login).unwrap();
+        let live = std::fs::read_to_string(crate::codex_config::get_codex_config_path()).unwrap();
+        let doc = live.parse::<DocumentMut>().unwrap();
+        let id = doc["model_provider"].as_str().unwrap();
+        assert_eq!(
+            doc["model_providers"][id]["capabilities"]["remote_compaction"].as_str(),
+            Some("v2")
+        );
+        assert!(!live.contains("disable_response_storage"));
+        assert!(!live.contains("supports_websockets = true"));
+        assert_eq!(state.db.get_all_providers("codex").unwrap().len(), 2);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn company_v2_normalization_handles_actual_selector_and_inline_capabilities() {
+        let _home = IsolatedHome::new();
+        let state = test_state();
+        let mut entry = sample_entry();
+        entry.models = vec![VERIFIED_COMPACTION_MODEL.into()];
+        entry.default_model = VERIFIED_COMPACTION_MODEL.into();
+        let (_, mut provider) = company_catalog_provider(&entry, &sample_login(), 1).unwrap();
+        provider.settings_config["config"] = json!("model_provider = \"company_alias\"\nmodel = \"gpt-5.6-sol\"\ndisable_response_storage = false\nfeatures = { remote_compaction_v2 = false, shell_snapshot = false }\nmodel_providers = { company_alias = { name = \"Company\", base_url = \"https://leharrt.com/v1\", supports_websockets = true, capabilities = { image_generation = false } } }\n");
+        state.db.save_provider("codex", &provider).unwrap();
+        assert_eq!(normalize_company_codex_providers(&state).unwrap(), 1);
+        assert_eq!(normalize_company_codex_providers(&state).unwrap(), 0);
+        let refreshed = state
+            .db
+            .get_provider_by_id(&provider.id, "codex")
+            .unwrap()
+            .unwrap();
+        let doc = refreshed.settings_config["config"]
+            .as_str()
+            .unwrap()
+            .parse::<DocumentMut>()
+            .unwrap();
+        assert_eq!(
+            doc["model_providers"]["company_alias"]["capabilities"]["remote_compaction"].as_str(),
+            Some("v2")
+        );
+        assert_eq!(
+            doc["model_providers"]["company_alias"]["capabilities"]["image_generation"].as_bool(),
+            Some(false)
+        );
+        assert_eq!(doc["features"]["shell_snapshot"].as_bool(), Some(false));
+        assert!(doc["features"].get("remote_compaction_v2").is_none());
+        assert!(doc.get("disable_response_storage").is_none());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn company_catalog_refresh_preserves_unrelated_capabilities_and_features() {
+        let _home = IsolatedHome::new();
+        let state = test_state();
+        let login = sample_login();
+        let (_, mut provider) = company_catalog_provider(&sample_entry(), &login, 1).unwrap();
+        let mut doc = provider.settings_config["config"]
+            .as_str()
+            .unwrap()
+            .parse::<DocumentMut>()
+            .unwrap();
+        doc["features"]["remote_compaction_v2"] = toml_edit::value(false);
+        doc["features"]["shell_snapshot"] = toml_edit::value(false);
+        doc["model_providers"]["custom"]["capabilities"]["image_generation"] =
+            toml_edit::value(false);
+        provider.settings_config["config"] = Value::String(doc.to_string());
+        state.db.save_provider("codex", &provider).unwrap();
+        sync_company_providers(&state, &login).unwrap();
+        let refreshed = state
+            .db
+            .get_provider_by_id(&provider.id, "codex")
+            .unwrap()
+            .unwrap();
+        let doc = refreshed.settings_config["config"]
+            .as_str()
+            .unwrap()
+            .parse::<DocumentMut>()
+            .unwrap();
+        assert!(doc["features"].get("remote_compaction_v2").is_none());
+        assert_eq!(doc["features"]["shell_snapshot"].as_bool(), Some(false));
+        assert_eq!(
+            doc["model_providers"]["custom"]["capabilities"]["image_generation"].as_bool(),
+            Some(false)
+        );
+        assert!(doc["model_providers"]["custom"]["capabilities"]
+            .get("remote_compaction")
+            .is_none());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn company_v2_refresh_revokes_capability_after_route_changes() {
+        let _home = IsolatedHome::new();
+        let state = test_state();
+        let mut login = sample_login();
+        login.catalog[0].models = vec![VERIFIED_COMPACTION_MODEL.into()];
+        login.catalog[0].default_model = VERIFIED_COMPACTION_MODEL.into();
+        let (_, provider) = company_catalog_provider(&login.catalog[0], &login, 1).unwrap();
+        for changed_base in [false, true] {
+            state.db.save_provider("codex", &provider).unwrap();
+            let mut changed = login.clone();
+            if changed_base {
+                changed.base_url = "https://other.example/v1".into();
+            } else {
+                changed.catalog[0].models.push("deepseek-v4-pro".into());
+            }
+            sync_company_providers(&state, &changed).unwrap();
+            let refreshed = state
+                .db
+                .get_provider_by_id(&provider.id, "codex")
+                .unwrap()
+                .unwrap();
+            let doc = refreshed.settings_config["config"]
+                .as_str()
+                .unwrap()
+                .parse::<DocumentMut>()
+                .unwrap();
+            assert_eq!(
+                doc["model_providers"]["custom"]["capabilities"]["remote_compaction"].as_str(),
+                Some("unsupported")
+            );
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn company_v2_existing_derived_card_stays_fresh_when_catalog_shrinks() {
+        let _home = IsolatedHome::new();
+        let state = test_state();
+        let mut login = sample_login();
+        login.catalog[0]
+            .models
+            .push(VERIFIED_COMPACTION_MODEL.into());
+        sync_company_providers(&state, &login).unwrap();
+        let entry = company_compaction_entry(&login.catalog[0], &login.base_url).unwrap();
+        let (_, derived) = company_catalog_provider(&entry, &login, 1).unwrap();
+        ProviderService::switch(&state, AppType::Codex, &derived.id).unwrap();
+        login.catalog[0].models = vec![VERIFIED_COMPACTION_MODEL.into()];
+        login.catalog[0].default_model = VERIFIED_COMPACTION_MODEL.into();
+        login.api_key = "rotated".into();
+        sync_company_providers(&state, &login).unwrap();
+        let refreshed = state
+            .db
+            .get_provider_by_id(&derived.id, "codex")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            refreshed.settings_config["auth"]["OPENAI_API_KEY"],
+            "rotated"
+        );
+        assert!(!refreshed
+            .notes
+            .unwrap_or_default()
+            .contains(STALE_COMPANY_NOTE));
+        assert_eq!(
+            ProviderService::current(&state, AppType::Codex).unwrap(),
+            derived.id
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn company_v2_does_not_trust_an_external_model_catalog() {
+        let _home = IsolatedHome::new();
+        let state = test_state();
+        let mut entry = sample_entry();
+        entry.models = vec![VERIFIED_COMPACTION_MODEL.into()];
+        entry.default_model = VERIFIED_COMPACTION_MODEL.into();
+        let (_, mut provider) = company_catalog_provider(&entry, &sample_login(), 1).unwrap();
+        let mut doc = provider.settings_config["config"]
+            .as_str()
+            .unwrap()
+            .parse::<DocumentMut>()
+            .unwrap();
+        doc["model_catalog_json"] = toml_edit::value("/tmp/unverified-model-catalog.json");
+        provider.settings_config["config"] = Value::String(doc.to_string());
+        state.db.save_provider("codex", &provider).unwrap();
+        normalize_company_codex_providers(&state).unwrap();
+        let refreshed = state
+            .db
+            .get_provider_by_id(&provider.id, "codex")
+            .unwrap()
+            .unwrap();
+        let doc = refreshed.settings_config["config"]
+            .as_str()
+            .unwrap()
+            .parse::<DocumentMut>()
+            .unwrap();
+        assert_eq!(
+            doc["model_providers"]["custom"]["capabilities"]["remote_compaction"].as_str(),
+            Some("unsupported")
+        );
+        assert_eq!(
+            doc["model_catalog_json"].as_str(),
+            Some("/tmp/unverified-model-catalog.json")
+        );
+    }
+
+    #[test]
+    fn company_refresh_cleans_inline_provider_transport_settings() {
+        for websocket in ["true", "false"] {
+            let input = format!("model_provider = \"company\"\ndisable_response_storage = false\nmodel_providers = {{ company = {{ base_url = \"https://leharrt.com\", supports_websockets = {websocket} }} }}\n");
+            let normalized = normalize_company_codex_config_text(&input);
+            let doc = normalized.parse::<DocumentMut>().unwrap();
+            let table = doc["model_providers"]["company"].as_table_like().unwrap();
+            assert!(doc.get("disable_response_storage").is_none());
+            assert_eq!(
+                table.get("supports_websockets").and_then(|v| v.as_bool()),
+                if websocket == "true" {
+                    None
+                } else {
+                    Some(false)
+                }
+            );
+            assert_eq!(
+                table.get("base_url").and_then(|v| v.as_str()),
+                Some("https://leharrt.com/v1")
+            );
+        }
+    }
+
+    #[test]
+    fn company_refresh_removes_both_storage_values_and_preserves_disabled_websocket() {
+        for storage in ["true", "false"] {
+            let input = format!(
+                "model_provider = \"company\"\ndisable_response_storage = {storage}\n\
+                 [model_providers.company]\n\
+                 base_url = \"https://leharrt.com/v1\"\n\
+                 supports_websockets = false\n\
+                 [mcp_servers.example]\ncommand = \"example\"\n"
+            );
+            let normalized = normalize_company_codex_config_text(&input);
+            let doc = normalized.parse::<DocumentMut>().unwrap();
+            assert!(doc.get("disable_response_storage").is_none());
+            assert_eq!(
+                doc["model_providers"]["company"]["supports_websockets"].as_bool(),
+                Some(false)
+            );
+            assert_eq!(
+                doc["mcp_servers"]["example"]["command"].as_str(),
+                Some("example")
+            );
+            assert_eq!(normalize_company_codex_config_text(&normalized), normalized);
+        }
+    }
+
+    #[test]
+    fn company_refresh_cleans_legacy_flat_transport_settings() {
+        let normalized = normalize_company_codex_config_text(
+            "disable_response_storage = false\nsupports_websockets = true\nbase_url = \"https://leharrt.com\"\n",
+        );
+        let doc = normalized.parse::<DocumentMut>().unwrap();
+        assert!(doc.get("disable_response_storage").is_none());
+        assert!(doc.get("supports_websockets").is_none());
+        assert_eq!(doc["wire_api"].as_str(), Some("responses"));
+    }
+
+    #[test]
+    fn company_refresh_cleans_malformed_config_without_forcing_storage() {
+        for storage in ["true", "false"] {
+            for websocket in ["true", "false"] {
+                let input = format!(
+                    "disable_response_storage = {storage} # legacy\n\
+                     [model_providers.custom]\n\
+                     base_url = \"https://leharrt.com\"\n\
+                     supports_websockets = {websocket} # legacy\n\
+                     this is not valid toml\n"
+                );
+                let normalized = normalize_company_codex_config_text(&input);
+                assert!(!normalized.contains("disable_response_storage"));
+                assert_eq!(
+                    normalized.contains("supports_websockets"),
+                    websocket == "false"
+                );
+                assert!(normalized.contains("this is not valid toml"));
+            }
+        }
     }
 
     #[test]

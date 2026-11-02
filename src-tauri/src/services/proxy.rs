@@ -660,6 +660,866 @@ impl ProxyService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
+    use std::env;
+    use tempfile::TempDir;
+
+    struct TempHome {
+        #[allow(dead_code)]
+        dir: TempDir,
+        original_home: Option<String>,
+        original_userprofile: Option<String>,
+        original_test_home: Option<String>,
+    }
+
+    impl TempHome {
+        fn new() -> Self {
+            let dir = TempDir::new().expect("failed to create temp home");
+            let original_home = env::var("HOME").ok();
+            let original_userprofile = env::var("USERPROFILE").ok();
+            let original_test_home = env::var("CC_SWITCH_TEST_HOME").ok();
+
+            env::set_var("HOME", dir.path());
+            env::set_var("USERPROFILE", dir.path());
+            env::set_var("CC_SWITCH_TEST_HOME", dir.path());
+
+            Self {
+                dir,
+                original_home,
+                original_userprofile,
+                original_test_home,
+            }
+        }
+    }
+
+    impl Drop for TempHome {
+        fn drop(&mut self) {
+            match &self.original_home {
+                Some(value) => env::set_var("HOME", value),
+                None => env::remove_var("HOME"),
+            }
+
+            match &self.original_userprofile {
+                Some(value) => env::set_var("USERPROFILE", value),
+                None => env::remove_var("USERPROFILE"),
+            }
+
+            match &self.original_test_home {
+                Some(value) => env::set_var("CC_SWITCH_TEST_HOME", value),
+                None => env::remove_var("CC_SWITCH_TEST_HOME"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn company_compaction_controller_pipeline_preserves_native_auth_and_selector() {
+        use crate::mode::controller;
+        use crate::services::provider::codex_official_models::{self as official_models, testing};
+        use crate::services::provider::ProviderService;
+
+        struct ResetModels;
+        impl Drop for ResetModels {
+            fn drop(&mut self) {
+                official_models::reset_test_env();
+            }
+        }
+        fn live() -> toml_edit::DocumentMut {
+            crate::codex_config::read_codex_config_text()
+                .unwrap()
+                .parse()
+                .unwrap()
+        }
+        fn assert_clean_features() {
+            let doc = live();
+            assert!(doc["features"].get("remote_compaction_v2").is_none());
+            assert_eq!(doc["features"]["keep_feature"].as_bool(), Some(true));
+        }
+        async fn refresh(state: &crate::store::AppState, provider: &Provider) -> bool {
+            let _guard = controller::lock_settled(state, &AppType::Codex)
+                .await
+                .unwrap();
+            controller::switch_route_locked(state, &AppType::Codex, provider)
+                .await
+                .unwrap()
+                .client_config_changed
+        }
+        let _home = TempHome::new();
+        crate::settings::reload_settings().unwrap();
+        crate::settings::update_settings(crate::settings::AppSettings {
+            unify_codex_session_history: true,
+            preserve_codex_official_auth_on_switch: true,
+            codex_quota_auto_fallback: false,
+            ..Default::default()
+        })
+        .unwrap();
+        let _models = ResetModels;
+        testing::Fake {
+            version: None,
+            responses: Arc::new(std::sync::Mutex::new(vec![])),
+            bundled: Some(testing::native_models(&[("official-model", 0)])),
+            keychain: Arc::new(std::sync::Mutex::new(
+                crate::services::subscription::CodexKeychainLogin::Unknown,
+            )),
+            keychain_reads: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            now: Arc::new(std::sync::Mutex::new(1)),
+            calls: Arc::new(std::sync::Mutex::new(vec![])),
+            on_fetch: None,
+        }
+        .install();
+        let db = Arc::new(Database::memory().unwrap());
+        let mut proxy_config = db.get_proxy_config().await.unwrap();
+        proxy_config.listen_port = 0;
+        db.update_proxy_config(proxy_config).await.unwrap();
+        let state = crate::store::AppState::new(db.clone());
+        let config = "model_provider = \"vendor-id\"\nmodel = \"gpt-5.6-sol\"\n[model_providers.vendor-id]\nname = \"Company\"\nbase_url = \"https://fixture.invalid/v1\"\nwire_api = \"responses\"\n[model_providers.vendor-id.capabilities]\nremote_compaction = \"v2\"\nunrelated = true\n";
+        let mut company = Provider::with_id(
+            "company-v2".into(),
+            "Company V2".into(),
+            json!({
+                "auth": {"OPENAI_API_KEY": "company-fixture-key"}, "config": config,
+            }),
+            None,
+        );
+        company.meta = Some(crate::provider::ProviderMeta {
+            provider_type: Some("company_auth".into()),
+            ..Default::default()
+        });
+        let mut legacy = company.clone();
+        legacy.id = "company-legacy".into();
+        legacy.settings_config["config"] =
+            json!(config.replace("remote_compaction = \"v2\"\n", ""));
+        let mut official = Provider::with_id(
+            "official".into(),
+            "Official".into(),
+            json!({
+                "auth": {}, "config": "model = \"official-model\"\n",
+            }),
+            None,
+        );
+        official.category = Some("official".into());
+        for provider in [&company, &legacy, &official] {
+            db.save_provider("codex", provider).unwrap();
+        }
+        let auth = testing::login("workspace", "compaction-test");
+        crate::codex_config::write_codex_live_atomic(&auth, Some("model = \"official-model\"\n"))
+            .unwrap();
+        let config_path = crate::codex_config::get_codex_config_path();
+        let auth_path = crate::codex_config::get_codex_auth_path();
+        let auth_bytes = std::fs::read(&auth_path).unwrap();
+        // Real direct writes run the auth planner, stash and transactional config writer.
+        for features in [
+            "[features]\nremote_compaction_v2 = false\nkeep_feature = true\n",
+            "features = { remote_compaction_v2 = false, keep_feature = true }\n",
+        ] {
+            std::fs::write(&config_path, features).unwrap();
+            ProviderService::switch(&state, AppType::Codex, &company.id).unwrap();
+            assert_clean_features();
+            assert_eq!(std::fs::read(&auth_path).unwrap(), auth_bytes);
+        }
+
+        // An existing noncompany proxy contract must change when company cleanup is adopted.
+        let mut personal = company.clone();
+        personal.meta = None;
+        db.save_provider("codex", &personal).unwrap();
+        std::fs::write(
+            &config_path,
+            "features = { remote_compaction_v2 = false, keep_feature = true }\n",
+        )
+        .unwrap();
+        controller::enter_with_route(&state, &AppType::Codex, false, Some(&personal.id))
+            .await
+            .unwrap();
+        assert_eq!(
+            live()["features"]["remote_compaction_v2"].as_bool(),
+            Some(false)
+        );
+        db.save_provider("codex", &company).unwrap();
+        assert!(
+            refresh(&state, &company).await,
+            "first company cleanup must publish"
+        );
+        assert_clean_features();
+        let cleaned = std::fs::read(&config_path).unwrap();
+        let stash_path =
+            crate::live::engine::DeviceStore::for_device().file("codex-login-stash.json");
+        let stash = std::fs::read(&stash_path).ok();
+        assert!(
+            !refresh(&state, &company).await,
+            "same contract must skip the writer"
+        );
+        assert_eq!(std::fs::read(&config_path).unwrap(), cleaned);
+        assert_eq!(std::fs::read(&auth_path).unwrap(), auth_bytes);
+        assert_eq!(std::fs::read(&stash_path).ok(), stash);
+        controller::exit(&state, &AppType::Codex).await.unwrap();
+
+        ProviderService::switch(&state, AppType::Codex, &official.id).unwrap();
+        controller::enter_with_route(&state, &AppType::Codex, true, Some(&official.id))
+            .await
+            .unwrap();
+        let selector = live()["model_provider"].as_str().unwrap().to_string();
+        let official_auth = std::fs::read(&auth_path).unwrap();
+        assert_eq!(official_auth, auth_bytes);
+        let official_stash = std::fs::read(&stash_path).ok();
+        controller::set_stack_member(&state, &AppType::Codex, &company.id, true)
+            .await
+            .unwrap();
+        let mixed = live();
+        assert_eq!(mixed["model_provider"].as_str(), Some(selector.as_str()));
+        assert_eq!(
+            mixed["model_providers"][selector.as_str()]["capabilities"]["remote_compaction"]
+                .as_str(),
+            Some("unsupported")
+        );
+        assert_eq!(
+            mixed["model_providers"][selector.as_str()]["requires_openai_auth"].as_bool(),
+            Some(true)
+        );
+        assert!(mixed["model_providers"][selector.as_str()]
+            .get("experimental_bearer_token")
+            .is_none());
+        assert_eq!(std::fs::read(&auth_path).unwrap(), official_auth);
+        assert_eq!(std::fs::read(&stash_path).ok(), official_stash);
+        let stack =
+            crate::mode::state::stack(&crate::live::engine::DeviceStore::for_device(), "codex")
+                .unwrap();
+        let model = crate::mode::stack::encode(
+            &AppType::Codex,
+            stack.key_of(&company.id).unwrap(),
+            "gpt-5.6-sol",
+            false,
+        );
+        let catalog: Value =
+            crate::config::read_json_file(&crate::codex_config::get_codex_model_catalog_path())
+                .unwrap();
+        assert!(catalog["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["slug"] == model));
+        controller::exit(&state, &AppType::Codex).await.unwrap();
+
+        let mut settings = crate::settings::get_settings();
+        settings.unify_codex_session_history = false;
+        crate::settings::update_settings(settings).unwrap();
+        ProviderService::switch(&state, AppType::Codex, &official.id).unwrap();
+        assert!(live().get("model_provider").is_none());
+        let before = std::fs::read(&config_path).unwrap();
+        let before_auth = std::fs::read(&auth_path).unwrap();
+        let before_stash = std::fs::read(&stash_path).ok();
+        let error = controller::enter_with_route(&state, &AppType::Codex, true, Some(&official.id))
+            .await
+            .unwrap_err();
+        assert!(error.contains("统一会话镜像"));
+        assert_eq!(std::fs::read(&config_path).unwrap(), before);
+        assert_eq!(std::fs::read(&auth_path).unwrap(), before_auth);
+        assert_eq!(std::fs::read(&stash_path).ok(), before_stash);
+        // The existing company Stack path without an explicit V2 opt-in stays allowed.
+        controller::set_stack_member(&state, &AppType::Codex, &company.id, false)
+            .await
+            .unwrap();
+        controller::set_stack_member(&state, &AppType::Codex, &legacy.id, true)
+            .await
+            .unwrap();
+        controller::enter_with_route(&state, &AppType::Codex, true, Some(&official.id))
+            .await
+            .unwrap();
+        assert!(live().get("model_provider").is_none());
+        assert_eq!(std::fs::read(&auth_path).unwrap(), auth_bytes);
+        controller::exit(&state, &AppType::Codex).await.unwrap();
+        if state.proxy_service.is_running().await {
+            state.proxy_service.stop().await.unwrap();
+        }
+        for provider in [&company, &legacy, &official] {
+            assert_eq!(
+                db.get_provider_by_id(&provider.id, "codex")
+                    .unwrap()
+                    .unwrap()
+                    .settings_config,
+                provider.settings_config
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn codex_quota_fallback_proxy_pipeline_preserves_auth_and_backup() {
+        use crate::services::codex_quota_fallback::{check_with_probe, has_owned_fallback};
+        use crate::services::subscription::{codex_login_quota_identity, CodexQuotaAvailability};
+        use axum::{http::HeaderMap, routing::post, Json, Router};
+
+        let requests = Arc::new(tokio::sync::Mutex::new(Vec::<(String, Value)>::new()));
+        let upstream = Router::new().route(
+            "/v1/responses",
+            post({
+                let requests = requests.clone();
+                move |headers: HeaderMap, Json(body): Json<Value>| {
+                    let requests = requests.clone();
+                    async move {
+                        let authorization = headers.get("authorization")
+                            .and_then(|value| value.to_str().ok()).unwrap_or_default().to_string();
+                        requests.lock().await.push((authorization, body));
+                        Json(json!({
+                            "id": "resp_company_test", "object": "response",
+                            "created_at": 1, "status": "completed", "model": "company-model",
+                            "output": [{"id": "msg_company_test", "type": "message",
+                                "role": "assistant", "status": "completed",
+                                "content": [{"type": "output_text", "text": "company response", "annotations": []}]}],
+                            "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}
+                        }))
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let upstream_url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let upstream_handle = tokio::spawn(async move {
+            axum::serve(listener, upstream).await.unwrap();
+        });
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap();
+
+        async fn assert_company_response(
+            service: &ProxyService,
+            client: &reqwest::Client,
+            requests: &tokio::sync::Mutex<Vec<(String, Value)>>,
+            phase: &str,
+            expected_count: usize,
+            model: &str,
+        ) {
+            let response = client
+                .post(format!(
+                    "{}/responses",
+                    service.build_proxy_urls().await.unwrap().1
+                ))
+                .bearer_auth(PROXY_TOKEN_PLACEHOLDER)
+                .json(&json!({"model": model, "input": phase, "stream": false}))
+                .send()
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = response.text().await.unwrap();
+            assert_eq!(status, reqwest::StatusCode::OK, "proxy response: {body}");
+            let body: Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(body["output"][0]["content"][0]["text"], "company response");
+            let requests = requests.lock().await;
+            assert_eq!(requests.len(), expected_count);
+            for (authorization, _) in requests.iter() {
+                assert_eq!(
+                    authorization, "Bearer company-key",
+                    "never forward native OAuth or the proxy placeholder"
+                );
+            }
+            let (_, forwarded) = requests.last().unwrap();
+            assert_eq!(forwarded["model"], "company-model");
+            assert_eq!(forwarded["input"], phase);
+            assert_eq!(forwarded["stream"], false);
+        }
+
+        async fn refresh_route(state: &crate::store::AppState, provider: &Provider, effort: &str) {
+            let mut updated = provider.clone();
+            let config = provider.settings_config["config"].as_str().unwrap();
+            updated.settings_config["config"] =
+                json!(format!("model_reasoning_effort = \"{effort}\"\n{config}"));
+            state.db.save_provider("codex", &updated).unwrap();
+            crate::mode::controller::resync_route(state, &AppType::Codex)
+                .await
+                .unwrap();
+            let live = crate::codex_config::read_codex_config_text().unwrap();
+            assert!(live.contains(&format!("model_reasoning_effort = \"{effort}\"")));
+        }
+
+        fn backup_snapshot() -> Vec<(std::path::PathBuf, Vec<u8>)> {
+            let dir = crate::live::engine::DeviceStore::for_device().first_write_backup_dir();
+            let mut files: Vec<_> = std::fs::read_dir(dir)
+                .unwrap()
+                .map(|entry| {
+                    let path = entry.unwrap().path();
+                    let bytes = std::fs::read(&path).unwrap();
+                    (path, bytes)
+                })
+                .collect();
+            files.sort_by(|a, b| a.0.cmp(&b.0));
+            files
+        }
+        let _home = TempHome::new();
+        crate::settings::reload_settings().unwrap();
+        crate::settings::update_settings(crate::settings::AppSettings {
+            codex_quota_auto_fallback: true,
+            preserve_codex_official_auth_on_switch: true,
+            ..Default::default()
+        })
+        .unwrap();
+        let db = Arc::new(Database::memory().unwrap());
+        let mut proxy_config = db.get_proxy_config().await.unwrap();
+        proxy_config.listen_port = 0;
+        db.update_proxy_config(proxy_config).await.unwrap();
+        let state = crate::store::AppState::new(db.clone());
+        let service = &state.proxy_service;
+        let config = format!("model_provider = \"company\"\nmodel = \"company-model\"\n[model_providers.company]\nname = \"Company\"\nbase_url = \"{upstream_url}\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n");
+        let provider = Provider::with_id(
+            "company".into(),
+            "Company".into(),
+            json!({"auth": {"OPENAI_API_KEY": "company-key"}, "config": config}),
+            None,
+        );
+        db.save_provider("codex", &provider).unwrap();
+        db.set_current_provider("codex", &provider.id).unwrap();
+        crate::settings::set_current_provider(&AppType::Codex, Some(&provider.id)).unwrap();
+        let auth = json!({"auth_mode": "chatgpt", "tokens": {
+            "access_token": "test-access", "refresh_token": "test-refresh", "account_id": "test-account"
+        }});
+        crate::codex_config::write_codex_live_atomic(&auth, Some(&config)).unwrap();
+        let auth_path = crate::codex_config::get_codex_auth_path();
+        let auth_bytes = std::fs::read(&auth_path).unwrap();
+        crate::mode::controller::enter_with_route(
+            &state,
+            &AppType::Codex,
+            true,
+            Some(&provider.id),
+        )
+        .await
+        .unwrap();
+        assert!(crate::mode::current::mode_state(&AppType::Codex).attached);
+        // The controller mirrors mode into this legacy flag; deliberately make
+        // it stale to prove quota eligibility uses DeviceStore instead.
+        db.set_proxy_flags_sync("codex", false, false).unwrap();
+        assert!(
+            !db.get_proxy_config_for_app("codex").await.unwrap().enabled,
+            "legacy enabled is not route-mode truth"
+        );
+        let backup = backup_snapshot();
+        let original = crate::codex_config::read_codex_config_text().unwrap();
+        assert!(original.contains(&service.build_proxy_urls().await.unwrap().1));
+        assert!(original.contains("PROXY_MANAGED"));
+        assert!(original.contains("requires_openai_auth = true"));
+        let identity = codex_login_quota_identity().expect("test native identity");
+        let probe = |quota| {
+            let identity = identity.clone();
+            move || async move { Some((identity, quota)) }
+        };
+        // A placeholder at any other endpoint is not evidence of this listener.
+        for wrong_url in ["http://127.0.0.1:1/v1", "https://relay.example/v1"] {
+            let wrong = original.replace(&service.build_proxy_urls().await.unwrap().1, wrong_url);
+            crate::codex_config::write_codex_live_config_atomic(Some(&wrong)).unwrap();
+            assert_eq!(
+                check_with_probe(&state, true, || async {
+                    panic!("unverified route must not probe quota")
+                })
+                .await,
+                Ok(None)
+            );
+            assert_eq!(
+                crate::codex_config::read_codex_config_text().unwrap(),
+                wrong
+            );
+        }
+        crate::codex_config::write_codex_live_config_atomic(Some(&original)).unwrap();
+        assert_eq!(
+            check_with_probe(&state, true, probe(CodexQuotaAvailability::Exhausted)).await,
+            Ok(Some(true))
+        );
+        assert!(has_owned_fallback());
+        let changed_auth = json!({"auth_mode": "chatgpt", "tokens": {
+            "access_token": "other-access", "account_id": "other-account"
+        }});
+        std::fs::write(&auth_path, serde_json::to_vec(&changed_auth).unwrap()).unwrap();
+        assert!(!has_owned_fallback());
+        std::fs::write(&auth_path, &auth_bytes).unwrap();
+        assert!(has_owned_fallback());
+        let depleted = crate::codex_config::read_codex_config_text().unwrap();
+        assert!(depleted.contains("requires_openai_auth = false"));
+        assert_company_response(service, &client, &requests, "exhausted", 1, "company-model").await;
+        assert_eq!(
+            check_with_probe(&state, true, probe(CodexQuotaAvailability::Unknown)).await,
+            Ok(None)
+        );
+        assert_eq!(
+            check_with_probe(&state, true, || async { None }).await,
+            Ok(None)
+        );
+        assert_eq!(
+            crate::codex_config::read_codex_config_text().unwrap(),
+            depleted
+        );
+        refresh_route(&state, &provider, "high").await;
+        assert!(crate::codex_config::read_codex_config_text()
+            .unwrap()
+            .contains("requires_openai_auth = false"));
+        assert_eq!(backup_snapshot(), backup);
+        assert_eq!(
+            check_with_probe(&state, true, probe(CodexQuotaAvailability::Available)).await,
+            Ok(Some(false))
+        );
+        assert!(!has_owned_fallback());
+        assert!(crate::codex_config::read_codex_config_text()
+            .unwrap()
+            .contains("requires_openai_auth = true"));
+        assert_eq!(std::fs::read(&auth_path).unwrap(), auth_bytes);
+
+        assert_company_response(service, &client, &requests, "recovered", 2, "company-model").await;
+
+        // The direct-switch login preference does not apply to takeover.
+        let mut takeover_settings = crate::settings::get_settings();
+        takeover_settings.preserve_codex_official_auth_on_switch = false;
+        crate::settings::update_settings(takeover_settings.clone()).unwrap();
+        assert_eq!(
+            check_with_probe(&state, true, probe(CodexQuotaAvailability::Exhausted)).await,
+            Ok(Some(true))
+        );
+        assert!(has_owned_fallback());
+        refresh_route(&state, &provider, "low").await;
+        assert!(has_owned_fallback());
+        assert!(crate::codex_config::read_codex_config_text()
+            .unwrap()
+            .contains("requires_openai_auth = false"));
+        assert_company_response(
+            service,
+            &client,
+            &requests,
+            "preserve-off-exhausted",
+            3,
+            "company-model",
+        )
+        .await;
+        assert_eq!(
+            check_with_probe(&state, true, probe(CodexQuotaAvailability::Available)).await,
+            Ok(Some(false))
+        );
+        assert!(!has_owned_fallback());
+        assert!(crate::codex_config::read_codex_config_text()
+            .unwrap()
+            .contains("requires_openai_auth = true"));
+        refresh_route(&state, &provider, "high").await;
+        assert!(crate::codex_config::read_codex_config_text()
+            .unwrap()
+            .contains("requires_openai_auth = true"));
+        assert_company_response(
+            service,
+            &client,
+            &requests,
+            "preserve-off-recovered",
+            4,
+            "company-model",
+        )
+        .await;
+        assert_eq!(std::fs::read(&auth_path).unwrap(), auth_bytes);
+        assert_eq!(backup_snapshot(), backup);
+        takeover_settings.preserve_codex_official_auth_on_switch = true;
+        crate::settings::update_settings(takeover_settings).unwrap();
+
+        assert_eq!(
+            check_with_probe(&state, true, probe(CodexQuotaAvailability::Exhausted)).await,
+            Ok(Some(true))
+        );
+        let mut settings = crate::settings::get_settings();
+        settings.codex_quota_auto_fallback = false;
+        crate::settings::update_settings(settings.clone()).unwrap();
+        assert_eq!(
+            check_with_probe(&state, false, || async {
+                panic!("disabling fallback must restore without probing")
+            })
+            .await,
+            Ok(Some(false))
+        );
+        assert!(!has_owned_fallback());
+        settings.codex_quota_auto_fallback = true;
+        crate::settings::update_settings(settings).unwrap();
+
+        // An observation made before a live edit must not change the new snapshot.
+        let stale_identity = identity.clone();
+        assert_eq!(
+            check_with_probe(&state, true, || async {
+                let live = crate::codex_config::read_codex_config_text().unwrap();
+                crate::codex_config::write_codex_live_config_atomic(Some(&format!(
+                    "{live}\n# concurrent edit\n"
+                )))
+                .unwrap();
+                Some((stale_identity, CodexQuotaAvailability::Exhausted))
+            })
+            .await,
+            Ok(None)
+        );
+        assert!(!has_owned_fallback());
+        assert_eq!(
+            check_with_probe(&state, true, probe(CodexQuotaAvailability::Exhausted)).await,
+            Ok(Some(true))
+        );
+
+        // Identical upstream TOML on another card still has independent ownership.
+        let mut other = provider.clone();
+        other.id = "other-company".into();
+        db.save_provider("codex", &other).unwrap();
+        crate::mode::controller::switch_route(&state, &AppType::Codex, &other.id)
+            .await
+            .unwrap();
+        assert!(crate::codex_config::read_codex_config_text()
+            .unwrap()
+            .contains("requires_openai_auth = true"));
+        assert_eq!(
+            check_with_probe(&state, true, probe(CodexQuotaAvailability::Available)).await,
+            Ok(None)
+        );
+        assert!(!has_owned_fallback());
+        assert_eq!(
+            check_with_probe(&state, true, probe(CodexQuotaAvailability::Exhausted)).await,
+            Ok(Some(true))
+        );
+        let backup = backup_snapshot();
+        assert!(backup
+            .iter()
+            .all(|(_, bytes)| !String::from_utf8_lossy(bytes).contains("PROXY_MANAGED")));
+        assert!(backup
+            .iter()
+            .all(|(_, bytes)| !String::from_utf8_lossy(bytes)
+                .contains("requires_openai_auth = false")));
+        crate::mode::controller::exit(&state, &AppType::Codex)
+            .await
+            .unwrap();
+        let restored = crate::codex_config::read_codex_config_text().unwrap();
+        assert!(!restored.contains("PROXY_MANAGED"));
+        assert!(restored.contains("requires_openai_auth = true"));
+        assert_eq!(
+            check_with_probe(&state, true, probe(CodexQuotaAvailability::Available)).await,
+            Ok(None)
+        );
+        assert_eq!(
+            crate::codex_config::read_codex_config_text().unwrap(),
+            restored
+        );
+        assert_eq!(std::fs::read(&auth_path).unwrap(), auth_bytes);
+        // Official default route with a genuinely published third-party Stack member.
+        use crate::services::provider::codex_official_models::{self as official_models, testing};
+        struct ResetOfficialModels;
+        impl Drop for ResetOfficialModels {
+            fn drop(&mut self) {
+                official_models::reset_test_env();
+            }
+        }
+        let _models = ResetOfficialModels;
+        testing::Fake {
+            version: None,
+            responses: Arc::new(std::sync::Mutex::new(vec![])),
+            bundled: Some(testing::native_models(&[("official-model", 0)])),
+            keychain: Arc::new(std::sync::Mutex::new(
+                crate::services::subscription::CodexKeychainLogin::Unknown,
+            )),
+            keychain_reads: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            now: Arc::new(std::sync::Mutex::new(1)),
+            calls: Arc::new(std::sync::Mutex::new(vec![])),
+            on_fetch: None,
+        }
+        .install();
+        let mut official = Provider::with_id(
+            "native-official".into(),
+            "Official".into(),
+            json!({"auth": {}, "config": "model = \"official-model\"\n"}),
+            None,
+        );
+        official.category = Some("official".into());
+        db.save_provider("codex", &official).unwrap();
+        // Use a proper native identity without any external authentication operation.
+        let native = testing::login("workspace", "quota-test");
+        std::fs::write(&auth_path, serde_json::to_vec(&native).unwrap()).unwrap();
+        let native_bytes = std::fs::read(&auth_path).unwrap();
+        crate::mode::controller::enter_with_route(
+            &state,
+            &AppType::Codex,
+            true,
+            Some(&official.id),
+        )
+        .await
+        .unwrap();
+        crate::mode::controller::set_stack_member(&state, &AppType::Codex, &provider.id, true)
+            .await
+            .unwrap();
+        let stack =
+            crate::mode::state::stack(&crate::live::engine::DeviceStore::for_device(), "codex")
+                .unwrap();
+        let stack_model = crate::mode::stack::encode(
+            &AppType::Codex,
+            stack.key_of(&provider.id).unwrap(),
+            "company-model",
+            false,
+        );
+        let catalog: Value =
+            crate::config::read_json_file(&crate::codex_config::get_codex_model_catalog_path())
+                .unwrap();
+        assert!(catalog["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["slug"] == stack_model));
+        let baseline = crate::codex_config::read_codex_config_text().unwrap();
+        let baseline_doc: toml::Value = baseline.parse().unwrap();
+        let native_identity = codex_login_quota_identity().unwrap();
+        let native_probe = |quota| {
+            let identity = native_identity.clone();
+            move || async move { Some((identity, quota)) }
+        };
+        let stack_backups = backup_snapshot();
+        let stash_path =
+            crate::live::engine::DeviceStore::for_device().file("codex-login-stash.json");
+        let stash = std::fs::read(&stash_path).ok();
+        assert_eq!(
+            check_with_probe(
+                &state,
+                true,
+                native_probe(CodexQuotaAvailability::Exhausted)
+            )
+            .await,
+            Ok(Some(true))
+        );
+        let exhausted: toml::Value = crate::codex_config::read_codex_config_text()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(exhausted["model_provider"], baseline_doc["model_provider"]);
+        let id = exhausted["model_provider"].as_str().unwrap();
+        assert_eq!(
+            exhausted["model_providers"][id]["requires_openai_auth"].as_bool(),
+            Some(false)
+        );
+        assert_eq!(
+            exhausted["model_providers"][id]["experimental_bearer_token"].as_str(),
+            Some("PROXY_MANAGED")
+        );
+        assert_company_response(
+            service,
+            &client,
+            &requests,
+            "official-stack-exhausted",
+            5,
+            &stack_model,
+        )
+        .await;
+        // Placeholder auth must never upgrade to native OAuth for the official route.
+        let response = client.post(format!("{}/responses", service.build_proxy_urls().await.unwrap().1))
+            .bearer_auth(PROXY_TOKEN_PLACEHOLDER)
+            .json(&json!({"model": "official-model", "input": "official must remain limited", "stream": false}))
+            .send().await.unwrap();
+        assert!(response.status().is_client_error());
+        assert_eq!(requests.lock().await.len(), 5);
+        crate::mode::controller::resync_route(&state, &AppType::Codex)
+            .await
+            .unwrap();
+        assert!(
+            has_owned_fallback(),
+            "same-contract refresh must retain quota ownership"
+        );
+        assert_eq!(
+            check_with_probe(
+                &state,
+                true,
+                native_probe(CodexQuotaAvailability::Available)
+            )
+            .await,
+            Ok(Some(false))
+        );
+        let recovered: toml::Value = crate::codex_config::read_codex_config_text()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(recovered, baseline_doc);
+        assert_company_response(
+            service,
+            &client,
+            &requests,
+            "official-stack-recovered",
+            6,
+            &stack_model,
+        )
+        .await;
+        assert_eq!(std::fs::read(&auth_path).unwrap(), native_bytes);
+        assert_eq!(std::fs::read(&stash_path).ok(), stash);
+        assert_eq!(backup_snapshot(), stack_backups);
+
+        assert_eq!(
+            check_with_probe(
+                &state,
+                true,
+                native_probe(CodexQuotaAvailability::Exhausted)
+            )
+            .await,
+            Ok(Some(true))
+        );
+        crate::mode::controller::set_stack_member(&state, &AppType::Codex, &provider.id, false)
+            .await
+            .unwrap();
+        // Remove the other independently authenticated member left by the earlier phase.
+        crate::mode::controller::set_stack_member(&state, &AppType::Codex, &other.id, false)
+            .await
+            .unwrap();
+        assert!(!has_owned_fallback());
+        assert!(!crate::codex_config::read_codex_config_text()
+            .unwrap()
+            .contains("experimental_bearer_token = \"PROXY_MANAGED\""));
+        assert_eq!(
+            check_with_probe(&state, true, || async {
+                panic!("no usable published members")
+            })
+            .await,
+            Ok(None)
+        );
+        crate::mode::controller::set_stack_member(&state, &AppType::Codex, &provider.id, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            check_with_probe(
+                &state,
+                true,
+                native_probe(CodexQuotaAvailability::Exhausted)
+            )
+            .await,
+            Ok(Some(true))
+        );
+        crate::mode::controller::detach_all(&state).await;
+        assert!(!crate::mode::current::mode_state(&AppType::Codex).attached);
+        assert!(!has_owned_fallback());
+        assert_eq!(std::fs::read(&auth_path).unwrap(), native_bytes);
+        assert_eq!(
+            check_with_probe(&state, true, || async { panic!("detached must not probe") }).await,
+            Ok(None)
+        );
+
+        let mut settings = crate::settings::get_settings();
+        settings.unify_codex_session_history = false;
+        crate::settings::update_settings(settings).unwrap();
+        crate::mode::controller::enter_with_route(
+            &state,
+            &AppType::Codex,
+            true,
+            Some(&official.id),
+        )
+        .await
+        .unwrap();
+        let builtin = crate::codex_config::read_codex_config_text().unwrap();
+        assert_eq!(
+            check_with_probe(&state, true, || async {
+                panic!("builtin OpenAI needs manual mode")
+            })
+            .await,
+            Ok(None)
+        );
+        assert_eq!(
+            crate::codex_config::read_codex_config_text().unwrap(),
+            builtin
+        );
+        crate::mode::controller::exit(&state, &AppType::Codex)
+            .await
+            .unwrap();
+        upstream_handle.abort();
+        assert!(upstream_handle.await.unwrap_err().is_cancelled());
+        // Disabling the last takeover already stops and awaits the proxy server.
+        assert!(!service.is_running().await);
+        assert_eq!(requests.lock().await.len(), 6);
+        crate::settings::update_settings(crate::settings::AppSettings::default()).unwrap();
+    }
     async fn seed_distinct_app_proxy_configs(db: &Database) -> Vec<Value> {
         let mut configs = Vec::new();
         for (app, retries) in [("claude", 6), ("codex", 0), ("gemini", 2), ("grokbuild", 3)] {

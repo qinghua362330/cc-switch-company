@@ -304,6 +304,8 @@ pub fn import_from_codex(config: &mut MultiAppConfig) -> Result<usize, AppError>
 /// - 仅更新 `mcp_servers` 表，保留其它键
 /// - 仅写入启用项；无启用项时清理 mcp_servers 表
 pub fn sync_enabled_to_codex(config: &MultiAppConfig) -> Result<(), AppError> {
+    // Hold across the entire RMW; write_text_file below does not reacquire it.
+    let _write_guard = crate::codex_config::codex_live_write_lock();
     if !should_sync_codex_mcp() {
         return Ok(());
     }
@@ -441,6 +443,7 @@ pub fn sync_single_server_to_codex(
     id: &str,
     server_spec: &Value,
 ) -> Result<(), AppError> {
+    let _write_guard = crate::codex_config::codex_live_write_lock();
     if !should_sync_codex_mcp() {
         return Ok(());
     }
@@ -484,6 +487,7 @@ pub fn sync_single_server_to_codex(
 /// 从 Codex live 配置中移除单个 MCP 服务器
 /// 从正确的 [mcp_servers] 表中删除，同时清理可能存在于错误位置 [mcp.servers] 的数据
 pub fn remove_server_from_codex(id: &str) -> Result<(), AppError> {
+    let _write_guard = crate::codex_config::codex_live_write_lock();
     if !should_sync_codex_mcp() {
         return Ok(());
     }

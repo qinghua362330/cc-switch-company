@@ -842,6 +842,7 @@ pub fn write_codex_live_atomic(
     auth: &Value,
     config_text_opt: Option<&str>,
 ) -> Result<(), AppError> {
+    let _guard = codex_live_write_lock();
     let auth_path = get_codex_auth_path();
     let config_path = get_codex_config_path();
 
@@ -958,6 +959,45 @@ pub fn extract_codex_auth_api_key(auth: &Value) -> Option<String> {
         .map(str::trim)
         .filter(|key| !key.is_empty())
         .map(str::to_string)
+}
+
+/// Share the transactional writer's lock with the quota compare-and-write.
+pub(crate) fn codex_live_write_lock() -> crate::live::engine::AppWriteGuard {
+    crate::live::engine::lock_app("codex")
+}
+
+/// Config-only updates never replace the independently rotating login file.
+pub fn write_codex_live_config_atomic(config_text: Option<&str>) -> Result<(), AppError> {
+    write_codex_live_config_for_provider(config_text, None)
+}
+
+pub(crate) fn write_codex_live_config_for_provider(
+    config_text: Option<&str>,
+    provider_id: Option<&str>,
+) -> Result<(), AppError> {
+    let _guard = codex_live_write_lock();
+    let text = config_text.unwrap_or_default();
+    validate_config_toml(text)?;
+    let text = match provider_id {
+        Some(id) => crate::services::codex_quota_fallback::preserve_owned_fallback(id, text),
+        None => text.to_string(),
+    };
+    write_text_file_private(&get_codex_config_path(), &text)
+}
+
+/// Quota eligibility uses the same credential projection as the route writer.
+pub fn prepare_codex_provider_live_config(
+    auth: &Value,
+    config_text: &str,
+) -> Result<String, AppError> {
+    use crate::live::project::codex::{CodexProjection, RowInput};
+    let settings = json!({"auth": auth, "config": config_text});
+    CodexProjection::of(&RowInput {
+        settings: &settings,
+        official: false,
+        proxy_injected_oauth: false,
+    })
+    .map(|projection| projection.catalog_input_text())
 }
 
 pub fn extract_codex_api_key(auth: Option<&Value>, config_text: Option<&str>) -> Option<String> {

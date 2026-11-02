@@ -313,20 +313,26 @@ pub struct ForwardError {
 /// 不需要每条出口路径都手动调用。
 pub(crate) struct ActiveConnectionGuard {
     status: Arc<RwLock<ProxyStatus>>,
+    _reload_guard: tokio::sync::OwnedRwLockReadGuard<()>,
 }
 
 impl ActiveConnectionGuard {
     pub(crate) async fn acquire(status: Arc<RwLock<ProxyStatus>>) -> Self {
+        let reload_guard = crate::services::codex_app_refresh::enter_request().await;
         {
             let mut s = status.write().await;
             s.active_connections = s.active_connections.saturating_add(1);
         }
-        Self { status }
+        Self {
+            status,
+            _reload_guard: reload_guard,
+        }
     }
 }
 
 impl Drop for ActiveConnectionGuard {
     fn drop(&mut self) {
+        crate::services::codex_app_refresh::note_activity();
         // Drop 不能 await：把减量操作调度到 tokio runtime
         let status = self.status.clone();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {

@@ -1,0 +1,221 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-02",
+  "source_results_sha256": "882fc6415e22682173029acf8cf0dc63316a126c55e7f5144e346cb60b4e0725",
+  "scope": "Isolated manual compaction dispatch and synthetic continuation; no real upstream inference.",
+  "totals": {
+    "cases": 15,
+    "completed_cycles": 14,
+    "expected_config_rejections": 1
+  },
+  "engines": [
+    {
+      "version": "codex-cli 1.3.0",
+      "installation": "path_standalone_provenance_unverified",
+      "sha256": "c90962f5b816038b378db5baaf5b736a7b52b620119fcc25bfba60cb9997f2ff"
+    },
+    {
+      "version": "codex-cli 0.142.5",
+      "installation": "homebrew_cask",
+      "sha256": "0d9a9da26e49e62b2c36f11229920287fc05576e77140ec63621ef6fdb2ddcd1"
+    },
+    {
+      "version": "codex-cli 0.166.0-alpha.5.1",
+      "installation": "desktop_bundled_macho",
+      "sha256": "58a91f6ea19bea477ae3a2ec48d619f0039afe75d3476260747e11d201fa7cea"
+    }
+  ],
+  "common_configuration": {
+    "model": "gpt-5.4",
+    "provider_id": "custom",
+    "remote_compaction_v2_feature": "default",
+    "wire_api": "responses",
+    "requires_openai_auth": true,
+    "supports_websockets": false
+  },
+  "isolation": {
+    "temporary_home_and_workspace": true,
+    "synthetic_credentials_only": true,
+    "external_network": "Engine sandbox allows outbound only to the fixture loopback port.",
+    "proxy": "Proxy environment points to the same non-forwarding loopback fixture.",
+    "writes": "Engine sandbox permits writes only in its temporary fixture and the null device.",
+    "reads": "Real Codex user directory denied; other filesystem reads are not generally denied.",
+    "permissions": "TemporaryDirectory root uses private 0700 permissions; per-file 0600 was not explicitly set or measured.",
+    "cleanup": "Test child processes stopped before temporary fixtures were removed.",
+    "existing_configuration_modified": false,
+    "binaries_downloaded": false
+  },
+  "limitations": [
+    "Acceptance of the capability by older engines is not evidence that the field is recognized; invalid-value controls also succeeded.",
+    "No automatic compaction threshold, actual encrypted-summary semantics, production gateway, or running GUI reload was tested.",
+    "Standalone 1.3.0 release provenance is unverified; its numeric version must not be used to infer feature support.",
+    "The five cases per engine are dispatch controls, not performance measurements."
+  ],
+  "cases": [
+    {
+      "case": 1,
+      "version": "codex-cli 1.3.0",
+      "provider_name": "Company Codex",
+      "capability": "default",
+      "config_validation": "accepted",
+      "result": "completed",
+      "compaction_dispatch": "ordinary_summary_request",
+      "endpoint": "/v1/responses",
+      "continuation": "synthetic_summary_retained"
+    },
+    {
+      "case": 2,
+      "version": "codex-cli 1.3.0",
+      "provider_name": "Company Codex",
+      "capability": "v2",
+      "config_validation": "accepted",
+      "result": "completed",
+      "compaction_dispatch": "ordinary_summary_request",
+      "endpoint": "/v1/responses",
+      "continuation": "synthetic_summary_retained"
+    },
+    {
+      "case": 3,
+      "version": "codex-cli 1.3.0",
+      "provider_name": "Company Codex",
+      "capability": "invalid_probe_value",
+      "config_validation": "accepted",
+      "result": "completed",
+      "compaction_dispatch": "ordinary_summary_request",
+      "endpoint": "/v1/responses",
+      "continuation": "synthetic_summary_retained"
+    },
+    {
+      "case": 4,
+      "version": "codex-cli 1.3.0",
+      "provider_name": "OpenAI",
+      "capability": "default",
+      "config_validation": "accepted",
+      "result": "completed",
+      "compaction_dispatch": "legacy_remote_compaction",
+      "endpoint": "/v1/responses/compact",
+      "continuation": "synthetic_compaction_item_retained"
+    },
+    {
+      "case": 5,
+      "version": "codex-cli 1.3.0",
+      "provider_name": "OpenAI",
+      "capability": "v2",
+      "config_validation": "accepted",
+      "result": "completed",
+      "compaction_dispatch": "legacy_remote_compaction",
+      "endpoint": "/v1/responses/compact",
+      "continuation": "synthetic_compaction_item_retained"
+    },
+    {
+      "case": 6,
+      "version": "codex-cli 0.142.5",
+      "provider_name": "Company Codex",
+      "capability": "default",
+      "config_validation": "accepted",
+      "result": "completed",
+      "compaction_dispatch": "ordinary_summary_request",
+      "endpoint": "/v1/responses",
+      "continuation": "synthetic_summary_retained"
+    },
+    {
+      "case": 7,
+      "version": "codex-cli 0.142.5",
+      "provider_name": "Company Codex",
+      "capability": "v2",
+      "config_validation": "accepted",
+      "result": "completed",
+      "compaction_dispatch": "ordinary_summary_request",
+      "endpoint": "/v1/responses",
+      "continuation": "synthetic_summary_retained"
+    },
+    {
+      "case": 8,
+      "version": "codex-cli 0.142.5",
+      "provider_name": "Company Codex",
+      "capability": "invalid_probe_value",
+      "config_validation": "accepted",
+      "result": "completed",
+      "compaction_dispatch": "ordinary_summary_request",
+      "endpoint": "/v1/responses",
+      "continuation": "synthetic_summary_retained"
+    },
+    {
+      "case": 9,
+      "version": "codex-cli 0.142.5",
+      "provider_name": "OpenAI",
+      "capability": "default",
+      "config_validation": "accepted",
+      "result": "completed",
+      "compaction_dispatch": "v2_remote_compaction",
+      "endpoint": "/v1/responses",
+      "continuation": "synthetic_compaction_item_retained"
+    },
+    {
+      "case": 10,
+      "version": "codex-cli 0.142.5",
+      "provider_name": "OpenAI",
+      "capability": "v2",
+      "config_validation": "accepted",
+      "result": "completed",
+      "compaction_dispatch": "v2_remote_compaction",
+      "endpoint": "/v1/responses",
+      "continuation": "synthetic_compaction_item_retained"
+    },
+    {
+      "case": 11,
+      "version": "codex-cli 0.166.0-alpha.5.1",
+      "provider_name": "Company Codex",
+      "capability": "default",
+      "config_validation": "accepted",
+      "result": "completed",
+      "compaction_dispatch": "ordinary_summary_request",
+      "endpoint": "/v1/responses",
+      "continuation": "synthetic_summary_retained"
+    },
+    {
+      "case": 12,
+      "version": "codex-cli 0.166.0-alpha.5.1",
+      "provider_name": "Company Codex",
+      "capability": "v2",
+      "config_validation": "accepted",
+      "result": "completed",
+      "compaction_dispatch": "v2_remote_compaction",
+      "endpoint": "/v1/responses",
+      "continuation": "synthetic_compaction_item_retained"
+    },
+    {
+      "case": 13,
+      "version": "codex-cli 0.166.0-alpha.5.1",
+      "provider_name": "Company Codex",
+      "capability": "invalid_probe_value",
+      "config_validation": "rejected_unknown_variant",
+      "result": "expected_config_rejection",
+      "compaction_dispatch": null,
+      "endpoint": null,
+      "continuation": null
+    },
+    {
+      "case": 14,
+      "version": "codex-cli 0.166.0-alpha.5.1",
+      "provider_name": "OpenAI",
+      "capability": "default",
+      "config_validation": "accepted",
+      "result": "completed",
+      "compaction_dispatch": "v2_remote_compaction",
+      "endpoint": "/v1/responses",
+      "continuation": "synthetic_compaction_item_retained"
+    },
+    {
+      "case": 15,
+      "version": "codex-cli 0.166.0-alpha.5.1",
+      "provider_name": "OpenAI",
+      "capability": "v2",
+      "config_validation": "accepted",
+      "result": "completed",
+      "compaction_dispatch": "v2_remote_compaction",
+      "endpoint": "/v1/responses",
+      "continuation": "synthetic_compaction_item_retained"
+    }
+  ]
+}

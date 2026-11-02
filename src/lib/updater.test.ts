@@ -72,6 +72,9 @@ describe("checkForUpdate", () => {
   });
 
   it.each([
+    ["3.20.2", "4.0.24-company.1", "available"],
+    ["4.0.10-company.4", "4.0.24-company.1", "available"],
+    ["4.0.24-company.1", "4.0.24-company.1", "up-to-date"],
     ["4.0.10", "4.0.10-company.1", "available"],
     ["4.0.10-company.2", "4.0.10-company.10", "available"],
     ["4.0.10-company.10", "4.0.10-company.2", "up-to-date"],

@@ -898,6 +898,209 @@ fn parse_codex_credits_balance(credits: &serde_json::Value) -> Option<f64> {
     (balance.is_finite() && balance > 0.0).then_some(balance)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CodexQuotaAvailability {
+    Available,
+    Exhausted,
+    Unknown,
+}
+
+fn codex_quota_fingerprint(token: &str, account_id: Option<&str>) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut hash = Sha256::new();
+    hash.update(b"codex-login-quota-v2");
+    // A workspace can contain multiple users. Frame both fields independently.
+    if let Some(id) = account_id.filter(|id| !id.trim().is_empty()) {
+        hash.update(b":account:");
+        hash.update((id.len() as u64).to_be_bytes());
+        hash.update(id.as_bytes());
+    } else {
+        hash.update(b":no-account:");
+    }
+    // Decode only for local identity comparison, not JWT authentication.
+    if let Some(subject) = crate::codex_config::extract_codex_id_token_subject(token)
+        .filter(|subject| !subject.trim().is_empty())
+    {
+        hash.update(b":subject:");
+        hash.update(subject.as_bytes());
+    } else {
+        hash.update(b":token:");
+        hash.update(token.as_bytes());
+    }
+    format!("{:x}", hash.finalize())
+}
+
+fn codex_probe_uses_file_credentials(config_text: &str) -> bool {
+    let Ok(config) = config_text.parse::<toml::Value>() else {
+        return false;
+    };
+    match config.get("cli_auth_credentials_store") {
+        None => true,
+        Some(mode) => mode.as_str() == Some("file"),
+    }
+}
+
+/// Poll only an unambiguous file-backed login in the home whose config we manage.
+/// Keyring/auto/ephemeral modes require a scoped resolver; never use a global item.
+fn read_codex_probe_credentials() -> CodexCredentials {
+    let home = crate::codex_config::get_codex_config_dir();
+    let config_text = match std::fs::read_to_string(home.join("config.toml")) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(_) => return (None, None, CredentialStatus::ParseError, None),
+    };
+    if !codex_probe_uses_file_credentials(&config_text) {
+        return (None, None, CredentialStatus::NotFound, None);
+    }
+    // Reuse the official-auth parser without the general reader's global keychain fallback.
+    match std::fs::read_to_string(home.join("auth.json")) {
+        Ok(content) => parse_codex_credentials_json(&content),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            (None, None, CredentialStatus::NotFound, None)
+        }
+        Err(_) => (None, None, CredentialStatus::ParseError, None),
+    }
+}
+
+/// Re-read before applying a probe result; same-account token refreshes are safe.
+pub(crate) fn codex_login_quota_identity() -> Option<String> {
+    let (token, account_id, _, _) = read_codex_probe_credentials();
+    Some(codex_quota_fingerprint(&token?, account_id.as_deref()))
+}
+
+/// Read-only probe: no refresh, credential writes, or response/error logging.
+pub(crate) async fn probe_codex_login_quota() -> Option<(String, CodexQuotaAvailability)> {
+    let (token, account_id, _, _) = tokio::task::spawn_blocking(read_codex_probe_credentials)
+        .await
+        .ok()?;
+    let token = token?;
+    let identity = codex_quota_fingerprint(&token, account_id.as_deref());
+    let client = crate::proxy::http_client::get();
+    let mut request = client
+        .get("https://chatgpt.com/backend-api/wham/usage")
+        .bearer_auth(&token)
+        .header("User-Agent", "codex-cli")
+        .header("Accept", "application/json")
+        .timeout(std::time::Duration::from_secs(15));
+    if let Some(id) = account_id {
+        request = request.header("ChatGPT-Account-Id", id);
+    }
+    let availability = match request.send().await {
+        Ok(response) if response.status().is_success() => match response.bytes().await {
+            Ok(body) => classify_codex_login_quota(&body),
+            Err(_) => CodexQuotaAvailability::Unknown,
+        },
+        _ => CodexQuotaAvailability::Unknown,
+    };
+    Some((identity, availability))
+}
+
+// Keep the stricter automation contract separate from the frontend usage model.
+#[derive(Deserialize)]
+struct CodexQuotaProbeResponse {
+    rate_limit: Option<CodexQuotaProbeLimit>,
+    credits: Option<CodexQuotaProbeCredits>,
+    error: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct CodexQuotaProbeLimit {
+    allowed: Option<bool>,
+    limit_reached: Option<bool>,
+    primary_window: Option<CodexRateLimitWindow>,
+    secondary_window: Option<CodexRateLimitWindow>,
+}
+
+#[derive(Deserialize)]
+struct CodexQuotaProbeCredits {
+    has_credits: Option<bool>,
+    unlimited: Option<bool>,
+    balance: Option<serde_json::Value>,
+}
+
+fn classify_codex_login_quota(body: &[u8]) -> CodexQuotaAvailability {
+    use CodexQuotaAvailability::{Available, Exhausted, Unknown};
+
+    let Ok(body) = serde_json::from_slice::<CodexQuotaProbeResponse>(body) else {
+        return Unknown;
+    };
+    if body.error.is_some() {
+        return Unknown;
+    }
+    let mut credit_state = Unknown;
+    if let Some(credits) = body.credits {
+        let balance = match credits.balance {
+            None => None,
+            Some(serde_json::Value::Number(n)) => match n.as_f64() {
+                Some(b) => Some(b),
+                None => return Unknown,
+            },
+            Some(serde_json::Value::String(s)) => match s.parse::<f64>() {
+                Ok(b) => Some(b),
+                Err(_) => return Unknown,
+            },
+            _ => return Unknown,
+        };
+        // An invalid string/number must not become evidence of zero credits.
+        if balance.is_some_and(|b| !b.is_finite() || b < 0.0) {
+            return Unknown;
+        }
+        if credits.unlimited == Some(true) {
+            credit_state = Available;
+        } else {
+            if matches!((credits.has_credits, balance), (Some(false), Some(b)) if b > 0.0)
+                || matches!((credits.has_credits, balance), (Some(true), Some(0.0)))
+            {
+                return Unknown;
+            }
+            if credits.has_credits == Some(true) || balance.is_some_and(|b| b > 0.0) {
+                credit_state = Available;
+            } else if credits.has_credits == Some(false) || balance == Some(0.0) {
+                credit_state = Exhausted;
+            }
+        }
+    }
+    let mut quota_state = Unknown;
+    if let Some(limit) = body.rate_limit {
+        let mut has_window = false;
+        let mut exhausted_window = false;
+        for window in [limit.primary_window, limit.secondary_window]
+            .into_iter()
+            .flatten()
+        {
+            let Some(used) = window.used_percent else {
+                return Unknown;
+            };
+            if !used.is_finite() || used < 0.0 {
+                return Unknown;
+            }
+            has_window = true;
+            exhausted_window |= used >= 100.0;
+        }
+        if limit
+            .allowed
+            .zip(limit.limit_reached)
+            .is_some_and(|(a, r)| a == r)
+            || (exhausted_window
+                && (limit.allowed == Some(true) || limit.limit_reached == Some(false)))
+        {
+            return Unknown;
+        }
+        if limit.allowed == Some(false) || limit.limit_reached == Some(true) || exhausted_window {
+            quota_state = Exhausted;
+        } else if limit.allowed == Some(true) && (has_window || limit.limit_reached == Some(false))
+        {
+            quota_state = Available;
+        }
+    }
+    match (quota_state, credit_state) {
+        (_, Available) | (Available, _) => Available,
+        (Exhausted, Exhausted) => Exhausted,
+        _ => Unknown,
+    }
+}
+
 /// 根据窗口秒数映射到 tier 名称（与 Claude 的命名兼容以复用前端 i18n）
 fn window_seconds_to_tier_name(secs: i64) -> String {
     match secs {
@@ -2312,6 +2515,172 @@ mod tests {
         assert_eq!(quota.tiers.len(), 1);
         assert_eq!(quota.tiers[0].name, TIER_SEVEN_DAY_FABLE);
         assert_eq!(quota.tiers[0].utilization, 100.0);
+    }
+
+    fn classify(value: serde_json::Value) -> CodexQuotaAvailability {
+        classify_codex_login_quota(&serde_json::to_vec(&value).unwrap())
+    }
+
+    #[test]
+    fn codex_probe_exhaustion_requires_explicit_no_credits() {
+        use serde_json::json;
+        for limit in [
+            json!({"allowed": false}),
+            json!({"limit_reached": true}),
+            json!({"primary_window": {"used_percent": 100}}),
+            json!({"secondary_window": {"used_percent": 105}}),
+        ] {
+            assert_eq!(
+                classify(json!({"rate_limit": limit})),
+                CodexQuotaAvailability::Unknown
+            );
+            for credits in [
+                json!({"has_credits": false, "unlimited": false}),
+                json!({"balance": 0, "unlimited": false}),
+                json!({"balance": "0.00", "unlimited": false}),
+            ] {
+                assert_eq!(
+                    classify(json!({"rate_limit": limit, "credits": credits})),
+                    CodexQuotaAvailability::Exhausted
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn codex_probe_usable_credits_override_exhausted_quota() {
+        use serde_json::json;
+        for credits in [
+            json!({"has_credits": true}),
+            json!({"balance": 3.5}),
+            json!({"balance": "3.50"}),
+            json!({"unlimited": true, "balance": "0"}),
+        ] {
+            assert_eq!(
+                classify(
+                    json!({"rate_limit": {"allowed": false, "limit_reached": true}, "credits": credits})
+                ),
+                CodexQuotaAvailability::Available
+            );
+        }
+    }
+
+    #[test]
+    fn codex_probe_available_quota_does_not_require_credits() {
+        use serde_json::json;
+        for limit in [
+            json!({"allowed": true, "limit_reached": false}),
+            json!({"allowed": true, "primary_window": {"used_percent": 12}, "secondary_window": {"used_percent": 99}}),
+        ] {
+            assert_eq!(
+                classify(json!({"rate_limit": limit})),
+                CodexQuotaAvailability::Available
+            );
+        }
+    }
+
+    #[test]
+    fn codex_probe_contradictory_or_incomplete_evidence_is_unknown() {
+        use serde_json::json;
+        for body in [
+            json!({}),
+            json!({"rate_limit": {"allowed": true}}),
+            json!({"rate_limit": {"allowed": true, "limit_reached": true}}),
+            json!({"rate_limit": {"allowed": false, "limit_reached": false}}),
+            json!({"rate_limit": {"allowed": true, "primary_window": {"used_percent": 100}}}),
+            json!({"rate_limit": {"limit_reached": false, "secondary_window": {"used_percent": 100}}}),
+            json!({"rate_limit": {"allowed": false}, "credits": {}}),
+            json!({"rate_limit": {"allowed": false}, "credits": {"unlimited": false}}),
+            json!({"credits": {"has_credits": false, "balance": 10}}),
+            json!({"credits": {"has_credits": true, "balance": "0"}}),
+            json!({"credits": {"has_credits": false, "balance": "bad"}, "rate_limit": {"allowed": false}}),
+            json!({"credits": {"balance": "NaN"}}),
+            json!({"credits": {"balance": "inf"}}),
+            json!({"credits": {"balance": -1}}),
+            json!({"credits": {"balance": []}}),
+            json!({"rate_limit": {"allowed": "false"}}),
+            json!({"rate_limit": {"allowed": true, "primary_window": {}}}),
+            json!({"rate_limit": {"primary_window": {"used_percent": -1}}}),
+            json!({"error": {"message": "unauthorized"}, "credits": {"unlimited": true}}),
+            json!(null),
+        ] {
+            assert_eq!(
+                classify(body.clone()),
+                CodexQuotaAvailability::Unknown,
+                "{body}"
+            );
+        }
+        assert_eq!(
+            classify_codex_login_quota(b"not json"),
+            CodexQuotaAvailability::Unknown
+        );
+    }
+
+    #[test]
+    fn codex_probe_identity_is_opaque_and_stable_across_account_token_refresh() {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+        let token = |subject: &str, issued_at: u64| {
+            format!(
+                "{}.{}.fixture-signature",
+                URL_SAFE_NO_PAD.encode(br#"{"alg":"RS256"}"#),
+                URL_SAFE_NO_PAD.encode(
+                    serde_json::to_vec(&serde_json::json!({"sub": subject, "iat": issued_at}))
+                        .unwrap()
+                )
+            )
+        };
+        let original = token("user-a", 100);
+        let refreshed = token("user-a", 200);
+        let different_user = token("user-b", 200);
+        let id = codex_quota_fingerprint(&original, Some("workspace"));
+        assert_eq!(id.len(), 64);
+        assert!(id.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_eq!(id, codex_quota_fingerprint(&original, Some("workspace")));
+        assert_eq!(id, codex_quota_fingerprint(&refreshed, Some("workspace")));
+        assert_ne!(
+            id,
+            codex_quota_fingerprint(&different_user, Some("workspace"))
+        );
+        assert_ne!(
+            id,
+            codex_quota_fingerprint(&original, Some("other-workspace"))
+        );
+        assert_ne!(
+            codex_quota_fingerprint(&token("bc", 100), Some("a")),
+            codex_quota_fingerprint(&token("c", 100), Some("ab"))
+        );
+    }
+
+    #[test]
+    fn codex_probe_identity_falls_back_to_token_without_a_subject() {
+        let id = codex_quota_fingerprint("test-token", None);
+        assert_eq!(id, codex_quota_fingerprint("test-token", None));
+        assert_ne!(id, codex_quota_fingerprint("new-token", None));
+        assert_eq!(id, codex_quota_fingerprint("test-token", Some("")));
+        assert_eq!(id, codex_quota_fingerprint("test-token", Some("  ")));
+        assert_ne!(
+            codex_quota_fingerprint("test-token", Some("workspace")),
+            codex_quota_fingerprint("new-token", Some("workspace"))
+        );
+        assert_ne!(id, codex_quota_fingerprint("test-token", Some("workspace")));
+    }
+
+    #[test]
+    fn codex_probe_only_reads_unambiguous_file_storage() {
+        assert!(codex_probe_uses_file_credentials(""));
+        assert!(codex_probe_uses_file_credentials(
+            "cli_auth_credentials_store = 'file'"
+        ));
+        for text in [
+            "cli_auth_credentials_store = 'keyring'",
+            "cli_auth_credentials_store = 'auto'",
+            "cli_auth_credentials_store = 'ephemeral'",
+            "cli_auth_credentials_store = 'unknown'",
+            "cli_auth_credentials_store = true",
+            "invalid toml",
+        ] {
+            assert!(!codex_probe_uses_file_credentials(text), "{text}");
+        }
     }
 
     #[test]

@@ -568,6 +568,35 @@ function AppContent({ authShell }: { authShell: ReactNode }) {
     };
   }, [queryClient]);
 
+  useTauriEvent<{ active: boolean }>(
+    "codex-quota-fallback-changed",
+    ({ active }) => {
+      toast.info(
+        t(
+          active
+            ? "settings.codexQuotaFallbackActive"
+            : "settings.codexQuotaFallbackInactive",
+        ),
+        { duration: 8000 },
+      );
+    },
+  );
+
+  useTauriEvent<{ status: "waiting" | "reloaded" | "manual" }>(
+    "codex-login-mode-refresh",
+    ({ status }) => {
+      const messages = {
+        waiting: "settings.codexLoginModeRefreshWaiting",
+        reloaded: "settings.codexLoginModeRefreshReloaded",
+        manual: "settings.codexLoginModeRefreshManual",
+      };
+      const key = messages[status];
+      if (key) {
+        toast.info(t(key), { duration: 8000 });
+      }
+    },
+  );
+
   useTauriEvent("universal-provider-synced", async () => {
     await queryClient.invalidateQueries({ queryKey: ["providers"] });
     try {
