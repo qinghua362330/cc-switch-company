@@ -966,23 +966,13 @@ pub(crate) fn codex_live_write_lock() -> crate::live::engine::AppWriteGuard {
     crate::live::engine::lock_app("codex")
 }
 
-/// Config-only updates never replace the independently rotating login file.
-pub fn write_codex_live_config_atomic(config_text: Option<&str>) -> Result<(), AppError> {
-    write_codex_live_config_for_provider(config_text, None)
-}
-
-pub(crate) fn write_codex_live_config_for_provider(
-    config_text: Option<&str>,
-    provider_id: Option<&str>,
-) -> Result<(), AppError> {
+/// Simulate external config edits without replacing the fixture's login file.
+#[cfg(test)]
+pub(crate) fn write_codex_live_config_atomic(config_text: Option<&str>) -> Result<(), AppError> {
     let _guard = codex_live_write_lock();
     let text = config_text.unwrap_or_default();
     validate_config_toml(text)?;
-    let text = match provider_id {
-        Some(id) => crate::services::codex_quota_fallback::preserve_owned_fallback(id, text),
-        None => text.to_string(),
-    };
-    write_text_file_private(&get_codex_config_path(), &text)
+    write_text_file_private(&get_codex_config_path(), text)
 }
 
 /// Quota eligibility uses the same credential projection as the route writer.

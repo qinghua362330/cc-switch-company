@@ -196,7 +196,7 @@ fn active_table_for_route<'a>(
         return proxy_url.map(|_| (id, table));
     }
     if !bearer.is_some_and(|v| !v.trim().is_empty() && v != "PROXY_MANAGED")
-        && !env.is_some_and(|v| !v.trim().is_empty())
+        && env.is_none_or(|v| v.trim().is_empty())
     {
         return None;
     }
