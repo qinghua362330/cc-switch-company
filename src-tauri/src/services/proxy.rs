@@ -1357,6 +1357,11 @@ mod tests {
             .any(|row| row["slug"] == stack_model));
         let baseline = crate::codex_config::read_codex_config_text().unwrap();
         let baseline_doc: toml::Value = baseline.parse().unwrap();
+        assert_eq!(
+            baseline_doc["model_catalog_json"].as_str(),
+            Some(crate::codex_config::CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME),
+            "quota eligibility must resolve the planner's relative catalog pointer"
+        );
         let native_identity = codex_login_quota_identity().unwrap();
         let native_probe = |quota| {
             let identity = native_identity.clone();

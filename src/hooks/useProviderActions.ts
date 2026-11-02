@@ -217,13 +217,15 @@ export function useProviderActions(
       try {
         const result = await switchProviderMutation.mutateAsync(provider.id);
         await syncClaudePlugin(provider);
-        const shouldAutoLaunchCodex = activeApp === "codex";
+        // Routed switches must not restart the whole client, even when they
+        // update its config. A takeover without route metadata is ambiguous.
+        const shouldAutoLaunchCodex =
+          activeApp === "codex" && !result?.route && isProxyTakeover !== true;
         let launchedCodex = false;
 
         if (shouldAutoLaunchCodex) {
           try {
-            await providersApi.openCodexApp();
-            launchedCodex = true;
+            launchedCodex = (await providersApi.openCodexApp()) === true;
           } catch (error) {
             console.error(
               "[ProviderActions] Failed to auto launch Codex app",

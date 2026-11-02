@@ -470,6 +470,16 @@ pub(crate) fn proxy_identity(
     ))
 }
 
+fn read_owned_catalog(text: &str, catalog_path: &Path) -> Option<serde_json::Value> {
+    let resolved = codex_config::resolve_cc_switch_catalog_path(text, catalog_path.parent()?)?;
+    // The projection uses a relative filename. Resolve it with the shared path
+    // guard, but do not accept another same-named catalog elsewhere in the home.
+    if resolved != std::fs::canonicalize(catalog_path).ok()? {
+        return None;
+    }
+    serde_json::from_slice(&std::fs::read(resolved).ok()?).ok()
+}
+
 async fn eligible_route(state: &AppState, text: &str) -> Option<(String, Option<String>)> {
     use crate::live::engine::DeviceStore;
     let mode = crate::mode::state::mode_state(&DeviceStore::for_device(), "codex").ok()?;
@@ -491,14 +501,7 @@ async fn eligible_route(state: &AppState, text: &str) -> Option<(String, Option<
             crate::mode::stack::published_members(&state.db, &AppType::Codex, &stack, Some(id))
                 .ok()?;
         let catalog_path = codex_config::get_codex_model_catalog_path();
-        let catalog = (doc.get("model_catalog_json").and_then(|v| v.as_str())
-            == catalog_path.to_str())
-        .then(|| {
-            std::fs::read(&catalog_path)
-                .ok()
-                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-        })
-        .flatten();
+        let catalog = read_owned_catalog(text, &catalog_path);
         let identity = proxy_identity(&provider, &url, &members, catalog.as_ref())?;
         Some((identity, Some(url)))
     } else {
@@ -690,6 +693,42 @@ pub(crate) fn start(app: tauri::AppHandle, state: AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn quota_catalog_accepts_projected_relative_path_but_not_foreign_catalogs() {
+        let home = tempfile::tempdir().unwrap();
+        let base = home.path().join("codex");
+        std::fs::create_dir_all(base.join("other")).unwrap();
+        let filename = codex_config::CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME;
+        let catalog = base.join(filename);
+        let foreign = base.join("other").join(filename);
+        let outside = home.path().join(filename);
+        let value = serde_json::json!({"models": [{"slug": "ccs-company/company-model"}]});
+        for path in [&catalog, &foreign, &outside] {
+            std::fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+        }
+        let config = |path: &Path| {
+            let mut doc = DocumentMut::new();
+            doc["model_catalog_json"] = toml_edit::value(path.to_str().unwrap());
+            doc.to_string()
+        };
+        for path in [Path::new(filename), catalog.as_path()] {
+            assert_eq!(
+                read_owned_catalog(&config(path), &catalog),
+                Some(value.clone())
+            );
+        }
+        for path in [
+            foreign.as_path(),
+            outside.as_path(),
+            Path::new("other.json"),
+        ] {
+            assert!(read_owned_catalog(&config(path), &catalog).is_none());
+        }
+        assert!(read_owned_catalog("", &catalog).is_none());
+        std::fs::write(&catalog, "invalid-json").unwrap();
+        assert!(read_owned_catalog(&config(Path::new(filename)), &catalog).is_none());
+    }
+
     const CONFIG: &str = "model_provider = \"company\"\nmodel = \"company-model\"\n[model_providers.company]\nname = \"Company\"\nbase_url = \"https://relay.example/v1\"\nexperimental_bearer_token = \"test-key\"\nrequires_openai_auth = true\n";
     fn owner() -> Ownership {
         Ownership {

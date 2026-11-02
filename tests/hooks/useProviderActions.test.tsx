@@ -290,6 +290,7 @@ describe("useProviderActions", () => {
         "路由已切换至 Test Provider，后续新请求将使用该供应商。",
         { closeButton: true },
       );
+      expect(providersApiOpenCodexAppMock).not.toHaveBeenCalled();
     },
   );
 
@@ -311,6 +312,7 @@ describe("useProviderActions", () => {
       "路由目标已设为 Test Provider。客户端配置也已更新；重启 Codex 以加载更新后的配置。",
       { closeButton: true },
     );
+    expect(providersApiOpenCodexAppMock).not.toHaveBeenCalled();
   });
 
   it("describes the aggregation default without claiming to reroute selected aggregated models", async () => {
@@ -331,6 +333,7 @@ describe("useProviderActions", () => {
       "聚合默认供应商已设为 Test Provider；已选聚合模型仍使用各自的供应商。",
       { closeButton: true },
     );
+    expect(providersApiOpenCodexAppMock).not.toHaveBeenCalled();
   });
 
   it("uses the operation result even if the UI takeover status is stale", async () => {
@@ -351,6 +354,7 @@ describe("useProviderActions", () => {
       "路由已切换至 Test Provider，后续新请求将使用该供应商。",
       { closeButton: true },
     );
+    expect(providersApiOpenCodexAppMock).not.toHaveBeenCalled();
   });
 
   it("does not infer a hot switch solely from the UI takeover flag", async () => {
@@ -368,7 +372,88 @@ describe("useProviderActions", () => {
       "切换成功，请重启客户端以生效",
       { closeButton: true },
     );
+    expect(providersApiOpenCodexAppMock).not.toHaveBeenCalled();
   });
+
+  it.each([false, true])(
+    "does not restart Codex when only remembering a route (takeover=%s)",
+    async (takeover) => {
+      switchProviderMutateAsync.mockResolvedValueOnce({
+        warnings: [],
+        route: { kind: "remembered", clientConfigChanged: false },
+      });
+      const { wrapper } = createWrapper();
+      const { result } = renderHook(
+        () => useProviderActions("codex", takeover),
+        {
+          wrapper,
+        },
+      );
+      await act(async () => {
+        await result.current.switchProvider(
+          createProvider({ category: "custom" }),
+        );
+      });
+      expect(providersApiOpenCodexAppMock).not.toHaveBeenCalled();
+      expect(toastSuccessMock).toHaveBeenCalledWith(
+        "已记住供应商 Test Provider，客户端接入路由或聚合后使用。",
+        { closeButton: true },
+      );
+    },
+  );
+
+  it("preserves automatic launch for a direct Codex switch with no route result", async () => {
+    switchProviderMutateAsync.mockResolvedValueOnce({ warnings: [] });
+    const { wrapper } = createWrapper();
+    const { result } = renderHook(() => useProviderActions("codex", false), {
+      wrapper,
+    });
+    await act(async () => {
+      await result.current.switchProvider(
+        createProvider({ category: "custom" }),
+      );
+    });
+    expect(providersApiOpenCodexAppMock).toHaveBeenCalledTimes(1);
+    expect(toastSuccessMock).toHaveBeenCalledWith("已切换并重启 Codex", {
+      closeButton: true,
+    });
+  });
+
+  it.each(["false", "rejection"])(
+    "does not claim Codex restarted when launch returns %s",
+    async (outcome) => {
+      switchProviderMutateAsync.mockResolvedValueOnce({ warnings: [] });
+      if (outcome === "false") {
+        providersApiOpenCodexAppMock.mockResolvedValueOnce(false);
+      } else {
+        providersApiOpenCodexAppMock.mockRejectedValueOnce(
+          new Error("fixture launch failed"),
+        );
+      }
+      const { wrapper } = createWrapper();
+      const { result } = renderHook(() => useProviderActions("codex", false), {
+        wrapper,
+      });
+      await act(async () => {
+        await result.current.switchProvider(
+          createProvider({ category: "custom" }),
+        );
+      });
+      expect(providersApiOpenCodexAppMock).toHaveBeenCalledTimes(1);
+      expect(toastSuccessMock).toHaveBeenCalledTimes(1);
+      expect(toastSuccessMock).toHaveBeenCalledWith(
+        "切换成功，请重启客户端以生效",
+        {
+          closeButton: true,
+        },
+      );
+      if (outcome === "rejection") {
+        expect(toastErrorMock).toHaveBeenCalledWith(
+          "重启 Codex 应用失败: fixture launch failed",
+        );
+      }
+    },
+  );
 
   it("asks for a Gemini CLI restart after switching, since it reads .env only at startup", async () => {
     switchProviderMutateAsync.mockResolvedValueOnce(undefined);

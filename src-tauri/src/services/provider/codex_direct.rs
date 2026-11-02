@@ -776,7 +776,14 @@ pub(crate) fn plan(
                         proxy_table.insert("name", toml_edit::value("OpenAI"));
                     }
                     if let Some(capabilities) = table.get("capabilities") {
-                        proxy_table.insert("capabilities", capabilities.clone());
+                        if is_company_provider(route) {
+                            proxy_table.insert("capabilities", capabilities.clone());
+                        } else if let Some(compaction) = capabilities.get("remote_compaction") {
+                            // Keep the upstream filtering contract for noncompany routes.
+                            let mut kept = Table::new();
+                            kept.insert("remote_compaction", compaction.clone());
+                            proxy_table.insert("capabilities", Item::Table(kept));
+                        }
                     }
                     // 重试次数和流空闲超时是 Codex 客户端自己的行为（对本地路由同样生效），
                     // 照搬行里的值；旧版接管只改地址，这几个键一直留着（#8265）。
@@ -1590,6 +1597,42 @@ mod tests {
             unreachable!()
         };
         assert_eq!(table["capabilities"]["unrelated"].as_bool(), Some(true));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn proxy_capabilities_keep_noncompany_filtering_and_company_extensions() {
+        let db = Database::memory().unwrap();
+        for company in [false, true] {
+            for capability in [None, Some("v2"), Some("unsupported")] {
+                let provider = compaction_provider("route", company, capability);
+                let planned = plan(
+                    &db,
+                    &Owner::None,
+                    &Target::Proxy {
+                        route: &provider,
+                        base_url: "http://127.0.0.1:15721/v1",
+                        stack: &[],
+                    },
+                    &Prepared::default(),
+                )
+                .unwrap();
+                assert_eq!(effective_compaction(&planned.config.route), capability);
+                let RouteWrite::Custom(table) = &planned.config.route else {
+                    panic!("custom proxy")
+                };
+                assert_eq!(
+                    table
+                        .get("capabilities")
+                        .and_then(|caps| caps.get("unrelated"))
+                        .and_then(Item::as_bool),
+                    company.then_some(true),
+                );
+                if !company && capability.is_none() {
+                    assert!(table.get("capabilities").is_none());
+                }
+            }
+        }
     }
 
     #[test]
