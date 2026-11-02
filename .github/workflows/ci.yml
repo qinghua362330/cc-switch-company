@@ -23,7 +23,7 @@ jobs:
       contents: read
       pull-requests: read
     outputs:
-      # 定时 / 手动运行不过滤（过滤步骤被跳过、输出为空），一律当作两边都有改动
+      # 定时 / 手动 / 企业发布分支不做路径过滤，每个候选提交都验证两端。
       frontend: ${{ steps.filter.outputs.frontend || 'true' }}
       backend: ${{ steps.filter.outputs.backend || 'true' }}
     steps:
@@ -35,7 +35,7 @@ jobs:
 
       - name: Detect changed paths
         id: filter
-        if: github.event_name == 'pull_request' || github.event_name == 'push'
+        if: github.event_name == 'pull_request' || (github.event_name == 'push' && !startsWith(github.ref, 'refs/heads/release/company-'))
         uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         with:
           filters: |
