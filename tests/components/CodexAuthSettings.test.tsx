@@ -140,110 +140,46 @@ const defaults: SettingsFormState = {
   minimizeToTrayOnClose: true,
 };
 
-describe("CodexAuthSettings quota fallback", () => {
+describe("CodexAuthSettings official quota protection", () => {
   beforeEach(() => {
     getCompressionMock.mockResolvedValue(false);
     diskUsageMock.mockResolvedValue(0);
   });
 
-  const renderQuotaSettings = async (
-    settings: SettingsFormState,
-    onChange: ReturnType<typeof vi.fn>,
-  ) => {
+  it("does not offer the removed login fallback and leaves protection opt-in", async () => {
+    const onChange = vi.fn().mockResolvedValue(true);
     await act(async () => {
-      render(<CodexAuthSettings settings={settings} onChange={onChange} />);
+      render(<CodexAuthSettings settings={defaults} onChange={onChange} />);
     });
-  };
-
-  it("defaults quota, login preservation and unified history on", async () => {
-    const onChange = vi.fn();
-    await renderQuotaSettings(defaults, onChange);
-    const toggle = screen.getByRole("switch", {
-      name: "settings.codexQuotaAutoFallback",
+    expect(
+      screen.queryByRole("switch", {
+        name: "settings.codexQuotaAutoFallback",
+      }),
+    ).not.toBeInTheDocument();
+    const protection = screen.getByRole("switch", {
+      name: "settings.codexQuotaProtection.title",
     });
-    expect(toggle).toHaveAttribute("aria-checked", "true");
-    expect(
-      screen.getByRole("switch", {
-        name: "settings.preserveCodexOfficialAuthOnSwitch",
-      }),
-    ).toHaveAttribute("aria-checked", "true");
-    expect(
-      screen.getByRole("switch", {
-        name: "settings.unifyCodexSessionHistory",
-      }),
-    ).toHaveAttribute("aria-checked", "true");
-    fireEvent.click(toggle);
-    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(protection).toHaveAttribute("aria-checked", "false");
+    await act(async () => fireEvent.click(protection));
     expect(onChange).toHaveBeenCalledWith({
-      codexQuotaAutoFallback: false,
+      codexQuotaProtection: {
+        enabled: true,
+        fiveHourThreshold: 95,
+        weeklyThreshold: 98,
+      },
     });
   });
 
-  it("preserves an explicit opt-out even when login preservation is on", async () => {
+  it("keeps login preservation and unified history independent", async () => {
     const onChange = vi.fn();
-    await renderQuotaSettings(
-      {
-        ...defaults,
-        preserveCodexOfficialAuthOnSwitch: true,
-        codexQuotaAutoFallback: false,
-      },
-      onChange,
-    );
-    expect(
-      screen.getByRole("switch", { name: "settings.codexQuotaAutoFallback" }),
-    ).toHaveAttribute("aria-checked", "false");
-    expect(onChange).not.toHaveBeenCalled();
-  });
-
-  it("retains fallback when login preservation is off and allows turning it off", async () => {
-    const onChange = vi.fn();
-    await renderQuotaSettings(
-      {
-        ...defaults,
-        preserveCodexOfficialAuthOnSwitch: false,
-        unifyCodexSessionHistory: false,
-        codexQuotaAutoFallback: true,
-      },
-      onChange,
-    );
-    const toggle = screen.getByRole("switch", {
-      name: "settings.codexQuotaAutoFallback",
+    await act(async () => {
+      render(<CodexAuthSettings settings={defaults} onChange={onChange} />);
     });
-    expect(toggle).toHaveAttribute("aria-checked", "true");
-    expect(
-      screen.getByRole("switch", {
-        name: "settings.preserveCodexOfficialAuthOnSwitch",
-      }),
-    ).toHaveAttribute("aria-checked", "false");
-    expect(
-      screen.getByRole("switch", {
-        name: "settings.unifyCodexSessionHistory",
-      }),
-    ).toHaveAttribute("aria-checked", "false");
-    expect(onChange).not.toHaveBeenCalled();
-    fireEvent.click(toggle);
-    expect(onChange).toHaveBeenCalledTimes(1);
-    expect(onChange).toHaveBeenCalledWith({
-      codexQuotaAutoFallback: false,
-    });
-  });
-
-  it("does not alter fallback when changing login preservation", async () => {
-    const onChange = vi.fn();
-    await renderQuotaSettings(
-      {
-        ...defaults,
-        preserveCodexOfficialAuthOnSwitch: true,
-        codexQuotaAutoFallback: true,
-      },
-      onChange,
-    );
     fireEvent.click(
       screen.getByRole("switch", {
         name: "settings.preserveCodexOfficialAuthOnSwitch",
       }),
     );
-    expect(onChange).toHaveBeenCalledTimes(1);
     expect(onChange).toHaveBeenCalledWith({
       preserveCodexOfficialAuthOnSwitch: false,
     });

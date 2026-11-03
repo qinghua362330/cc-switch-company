@@ -8,7 +8,6 @@ use crate::config::{
 use crate::error::AppError;
 use crate::model_capabilities::{image_input_capability_from_modalities, ImageInputCapability};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-#[cfg(not(test))]
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -1387,8 +1386,8 @@ fn apply_codex_company_tiers(obj: &mut serde_json::Map<String, Value>, capabilit
     }
 }
 
-/// Apply only schema-valid pool capabilities. Official prompt/tool fields are
-/// untouched: subscriptions do not determine a company's model pool limits.
+/// Apply validated general fallback capabilities only when no native row matched.
+/// Server metadata must not override local bundled capabilities or user settings.
 fn apply_codex_company_capabilities(
     obj: &mut serde_json::Map<String, Value>,
     capabilities: &Value,
@@ -1433,8 +1432,83 @@ fn apply_codex_company_capabilities(
         .filter(|value| *value > 0 && *value <= i64::MAX as u64)
     {
         obj.insert("context_window".to_string(), json!(window));
-        obj.insert("max_context_window".to_string(), json!(window));
+        let maximum = capabilities
+            .get("max_context_window")
+            .and_then(Value::as_u64)
+            .filter(|maximum| *maximum >= window && *maximum <= i64::MAX as u64)
+            .unwrap_or(window);
+        obj.insert("max_context_window".to_string(), json!(maximum));
     }
+}
+
+/// A server native row is executable Codex metadata, not just a context hint.
+/// Accept it only for the exact client build it was extracted from. General
+/// scalar capabilities remain available when this compatibility check fails.
+fn company_snapshot_model(
+    capabilities: &Value,
+    model: &str,
+    client_version: Option<&str>,
+) -> Option<Value> {
+    let snapshot = capabilities.get("catalog_snapshot")?;
+    if snapshot.get("schema_version")?.as_u64()? != 1 {
+        return None;
+    }
+    let version = snapshot.get("codex_version")?.as_str()?;
+    if version.is_empty() || Some(version) != client_version {
+        return None;
+    }
+    let row = snapshot.get("model")?;
+    let slug = row.get("slug")?.as_str()?;
+    // Snapshot lookup is exact; never borrow a neighbouring model's tools.
+    if slug != model && model.strip_prefix("ccs-openai/") != Some(slug) {
+        return None;
+    }
+    let window = row.get("context_window")?.as_u64()?;
+    if window == 0 || window > i64::MAX as u64 {
+        return None;
+    }
+    if !row.get("base_instructions").is_some_and(Value::is_string)
+        && !row
+            .get("model_messages")
+            .and_then(|v| v.get("instructions_template"))
+            .is_some_and(Value::is_string)
+    {
+        return None;
+    }
+    for field in ["max_context_window", "auto_compact_token_limit"] {
+        if let Some(value) = row.get(field).filter(|value| !value.is_null()) {
+            let value = value.as_u64()?;
+            if value == 0
+                || value > i64::MAX as u64
+                || (field == "max_context_window" && value < window)
+            {
+                return None;
+            }
+        }
+    }
+    if let Some(percent) = row.get("effective_context_window_percent") {
+        if !(1..=100).contains(&percent.as_u64()?) {
+            return None;
+        }
+    }
+    if let Some(levels) = row.get("supported_reasoning_levels") {
+        let levels = levels.as_array()?;
+        if levels.is_empty()
+            || levels.iter().any(|level| {
+                !level.get("effort").is_some_and(Value::is_string)
+                    || !level.get("description").is_some_and(Value::is_string)
+            })
+        {
+            return None;
+        }
+    }
+    if let Some(modalities) = row.get("input_modalities") {
+        let modalities = modalities.as_array()?;
+        if modalities.is_empty() || modalities.iter().any(|value| !value.is_string()) {
+            return None;
+        }
+    }
+    normalize_codex_native_rows(vec![row.clone()])?.pop()
 }
 
 fn codex_catalog_model_entry(
@@ -1468,6 +1542,11 @@ fn codex_catalog_model_entry(
     if let Some(capabilities) = spec.capabilities.as_ref() {
         apply_codex_company_capabilities(entry_obj, capabilities);
     }
+    // Automatic server metadata is a fallback, never an explicit user setting.
+    if let Some(window) = spec.context_window {
+        entry_obj.insert("context_window".to_string(), json!(window));
+        entry_obj.insert("max_context_window".to_string(), json!(window));
+    }
 
     // Image support is a model capability, not a tool-profile capability.
     // Trust hidden preset metadata first, then the confirmed text-only registry;
@@ -1480,6 +1559,22 @@ fn codex_catalog_model_entry(
             spec.input_modalities.as_deref(),
         )),
     );
+    if spec.input_modalities.is_none() {
+        if let Some(modalities) = spec
+            .capabilities
+            .as_ref()
+            .and_then(|caps| caps.get("input_modalities"))
+            .and_then(Value::as_array)
+            .filter(|items| {
+                !items.is_empty()
+                    && items
+                        .iter()
+                        .all(|v| matches!(v.as_str(), Some("text" | "image")))
+            })
+        {
+            entry_obj.insert("input_modalities".to_string(), json!(modalities));
+        }
+    }
 
     if !matches!(
         profile,
@@ -1569,10 +1664,9 @@ struct CodexCatalogModelSpec {
     /// back to the template default when absent. Only consulted for
     /// `NativeResponses`.
     base_instructions: Option<String>,
-    /// 供应商声明的模型能力（推理档 / 速度档 / 服务档 / 上下文窗口）。
-    ///
-    /// 公司号池经 `/api/client/catalog` 下发。保留 GPT 官方 prompt/tools，
-    /// 推理档、窗口和速度/服务档使用校验后的公司声明。
+    /// 公司号池经 `/api/client/catalog` 下发的自动兜底能力与原生快照。
+    /// 本机原生条目优先；未命中时才使用版本匹配的快照或校验后的通用字段。
+    /// 不覆盖显式窗口，也不把通用字段当作原生 prompt/tools。
     capabilities: Option<Value>,
     /// Per-row override for the generated catalog's `supported_reasoning_levels`
     /// (e.g. ["none", "low", "medium", "high", "xhigh", "max"]). When omitted
@@ -1852,27 +1946,135 @@ fn push_env_codex_cli_candidates(candidates: &mut Vec<PathBuf>, seen: &mut HashS
     }
 }
 
-fn codex_cli_candidates() -> Vec<PathBuf> {
+/// Parse only executable paths from `ps -axo comm=` (never arguments/environment).
+/// A unique recognized bundle is evidence of a running desktop installation, not
+/// a claim about the foreground client. Multiple bundles are deliberately ambiguous.
+#[cfg(any(target_os = "macos", test))]
+fn running_codex_cli_candidates_from_comm(comm: &str) -> Vec<PathBuf> {
+    let mut bundle = None;
+    let mut executables = Vec::new();
+    let mut seen = HashSet::new();
+    for line in comm.lines() {
+        let path = Path::new(line.trim());
+        if !path.is_absolute()
+            || path
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
+        {
+            continue;
+        }
+        for ancestor in path.ancestors() {
+            let Some(name) = ancestor.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if !CODEX_DESKTOP_APP_BUNDLES.contains(&name) {
+                continue;
+            }
+            let Some(relative) = path.strip_prefix(ancestor).ok().and_then(Path::to_str) else {
+                continue;
+            };
+            let main = matches!(
+                (name, relative),
+                ("ChatGPT.app", "Contents/MacOS/ChatGPT") | ("Codex.app", "Contents/MacOS/Codex")
+            );
+            let cli = CODEX_DESKTOP_CLI_IN_BUNDLE.contains(&relative)
+                || relative == "Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex";
+            if !main && !cli {
+                continue;
+            }
+            if bundle.as_deref().is_some_and(|known| known != ancestor) {
+                return Vec::new();
+            }
+            bundle = Some(ancestor.to_path_buf());
+            if cli {
+                push_codex_cli_candidate(&mut executables, &mut seen, path.to_path_buf());
+            }
+            break;
+        }
+    }
+    if let Some(bundle) = bundle {
+        // Prefer an observed CLI path over inferred siblings in the same bundle.
+        for layout in CODEX_DESKTOP_CLI_IN_BUNDLE
+            .iter()
+            .copied()
+            .chain(std::iter::once(
+                "Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+            ))
+        {
+            push_codex_cli_candidate(&mut executables, &mut seen, bundle.join(layout));
+        }
+    }
+    executables
+}
+
+#[cfg(all(target_os = "macos", not(test)))]
+fn running_codex_cli_candidates() -> Vec<PathBuf> {
+    let Ok(output) = Command::new("/bin/ps")
+        .args(["-axo", "comm="])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    std::str::from_utf8(&output.stdout)
+        .map(running_codex_cli_candidates_from_comm)
+        .unwrap_or_default()
+}
+
+#[cfg(any(not(target_os = "macos"), test))]
+fn running_codex_cli_candidates() -> Vec<PathBuf> {
+    Vec::new()
+}
+
+/// Explicit selection wins, then a unique running macOS bundle, then installed
+/// desktop/standalone heuristics. Ambiguous or unavailable process discovery
+/// falls back to installation hints; use CC_SWITCH_CODEX_CLI to disambiguate.
+fn ordered_codex_cli_candidates(
+    explicit: Option<PathBuf>,
+    running: Vec<PathBuf>,
+    desktop: Vec<PathBuf>,
+    standalone: Vec<PathBuf>,
+) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     let mut seen = HashSet::new();
-
-    for candidate in CODEX_CLI_FIXED_CANDIDATES {
-        push_codex_cli_candidate(&mut candidates, &mut seen, PathBuf::from(candidate));
+    for candidate in explicit
+        .into_iter()
+        .chain(running)
+        .chain(desktop)
+        .chain(standalone)
+    {
+        push_codex_cli_candidate(&mut candidates, &mut seen, candidate);
     }
-
-    let home = get_home_dir();
-    push_env_codex_cli_candidates(&mut candidates, &mut seen);
-    push_home_codex_cli_candidates(&mut candidates, &mut seen, &home);
-    push_desktop_codex_cli_candidates(&mut candidates, &mut seen, &home);
-
     candidates
 }
 
-/// 桌面版自带的 CLI。排在最后：装了独立 CLI 的人照旧先用独立的那个。
-///
-/// - macOS：`/Applications` 和 `~/Applications` 下的 ChatGPT.app、Codex.app，新 bundle
-///   排在前面，不管装在哪个目录（别的系统上不存在，自然跳过）；
-/// - Windows：`%LOCALAPPDATA%\OpenAI\Codex\bin\<版本>\codex.exe`，版本目录随桌面版更新而变。
+fn codex_cli_candidates() -> Vec<PathBuf> {
+    let mut standalone = Vec::new();
+    let mut seen = HashSet::new();
+    for candidate in CODEX_CLI_FIXED_CANDIDATES {
+        push_codex_cli_candidate(&mut standalone, &mut seen, PathBuf::from(candidate));
+    }
+    let home = get_home_dir();
+    push_env_codex_cli_candidates(&mut standalone, &mut seen);
+    push_home_codex_cli_candidates(&mut standalone, &mut seen, &home);
+    let mut desktop = Vec::new();
+    push_desktop_codex_cli_candidates(&mut desktop, &mut HashSet::new(), &home);
+    ordered_codex_cli_candidates(
+        std::env::var_os("CC_SWITCH_CODEX_CLI")
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from),
+        running_codex_cli_candidates(),
+        desktop,
+        standalone,
+    )
+}
+
+/// Desktop locations are fallback discovery hints, not running-process detection.
+/// macOS supports both bundle layouts; Windows sorts installed versions by mtime.
 fn push_desktop_codex_cli_candidates(
     candidates: &mut Vec<PathBuf>,
     seen: &mut HashSet<String>,
@@ -1934,11 +2136,9 @@ fn push_codex_cli_candidates_newest_first(
     }
 }
 
-fn codex_bundled_models_command(candidate: &Path) -> Command {
+fn codex_cli_command(candidate: &Path) -> Command {
     let mut command = Command::new(candidate);
-    command
-        .args(["debug", "models", "--bundled"])
-        .stdin(Stdio::null());
+    command.stdin(Stdio::null());
 
     // A release build uses the Windows GUI subsystem, so a console child that
     // is created without this flag gets its own transient console window. npm
@@ -1950,6 +2150,97 @@ fn codex_bundled_models_command(candidate: &Path) -> Command {
     }
 
     command
+}
+
+fn codex_bundled_models_command(candidate: &Path) -> Command {
+    let mut command = codex_cli_command(candidate);
+    command.args(["debug", "models", "--bundled"]);
+    command
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CodexCatalogClient {
+    executable: PathBuf,
+    resolved: PathBuf,
+    modified: Option<std::time::SystemTime>,
+    size: u64,
+    version: String,
+}
+
+fn parse_codex_client_version(output: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(output).ok()?.trim();
+    let version = text.strip_prefix("codex-cli ")?.trim();
+    let core = version.split(['-', '+']).next()?;
+    let parts: Vec<_> = core.split('.').collect();
+    (parts.len() == 3
+        && parts
+            .iter()
+            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+        && !version.chars().any(char::is_whitespace))
+    .then(|| version.to_string())
+}
+
+/// Probe the exact candidate, never infer a client version from its directory name.
+fn select_codex_catalog_client(candidates: Vec<PathBuf>) -> Option<CodexCatalogClient> {
+    for candidate in candidates {
+        let executable = if candidate.components().count() == 1 && !candidate.is_absolute() {
+            let Some(path) = std::env::var_os("PATH").and_then(|paths| {
+                std::env::split_paths(&paths)
+                    .flat_map(|dir| {
+                        let path = dir.join(&candidate);
+                        #[cfg(windows)]
+                        {
+                            vec![path.with_extension("exe"), path.with_extension("cmd"), path]
+                        }
+                        #[cfg(not(windows))]
+                        {
+                            vec![path]
+                        }
+                    })
+                    .find(|path| path.is_file())
+            }) else {
+                continue;
+            };
+            path
+        } else {
+            candidate
+        };
+        let Ok(resolved) = fs::canonicalize(&executable) else {
+            continue;
+        };
+        let Ok(metadata) = fs::metadata(&resolved) else {
+            continue;
+        };
+        let Ok(output) = codex_cli_command(&executable).arg("--version").output() else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+        let Some(version) = parse_codex_client_version(&output.stdout) else {
+            continue;
+        };
+        return Some(CodexCatalogClient {
+            executable,
+            resolved,
+            modified: metadata.modified().ok(),
+            size: metadata.len(),
+            version,
+        });
+    }
+    None
+}
+
+/// Same selection as bundled catalog loading, even if this client cannot export a catalog.
+#[cfg(not(test))]
+pub(crate) fn codex_catalog_client_version() -> Option<String> {
+    select_codex_catalog_client(codex_cli_candidates()).map(|client| client.version)
+}
+
+#[cfg(test)]
+pub(crate) fn codex_catalog_client_version() -> Option<String> {
+    // Unit tests must not inspect a developer's installed clients/configuration.
+    CODEX_CATALOG_CLIENT_VERSION_OVERRIDE.with(|slot| slot.borrow().clone())
 }
 
 /// 没跑出 Codex 自带的模型列表。
@@ -1974,7 +2265,17 @@ impl std::fmt::Display for CodexBundledModelsError {
 /// 本机 Codex 自带的完整模型列表（`codex debug models --bundled`）。和账号无关，版本和
 /// 那个二进制一致。不能用不带 `--bundled` 的版本：那会读到 CC Switch 自己写的目录。
 pub(crate) fn load_codex_bundled_models() -> Result<Vec<Value>, CodexBundledModelsError> {
-    first_bundled_catalog(codex_cli_candidates(), |catalog| {
+    let client = select_codex_catalog_client(codex_cli_candidates())
+        .ok_or(CodexBundledModelsError::NoCli)?;
+    load_codex_client_bundled_models(&client)
+}
+
+fn load_codex_client_bundled_models(
+    client: &CodexCatalogClient,
+) -> Result<Vec<Value>, CodexBundledModelsError> {
+    // Do not silently replace a selected desktop client's missing catalog with an
+    // older standalone catalog. The caller can use its version-matched snapshot.
+    first_bundled_catalog(vec![client.executable.clone()], |catalog| {
         catalog
             .get("models")
             .and_then(Value::as_array)
@@ -2101,7 +2402,7 @@ fn codex_native_row_is_valid(row: &Value) -> bool {
 /// `tool_mode` 和 v2 子代理），转换层就是照它写的；名字、窗口、可见性都会被改写，跟调用哪个
 /// 模型无关。只用仓库里这份，不读 `models_cache.json` 也不跑 `codex`：官方改了那边的条目
 /// （标隐藏、加新工具模式、下线）会悄悄带进第三方模型。Codex 新增解析必需字段时，补进这里和
-/// `CODEX_CATALOG_PARSER_REQUIRED_FIELDS`。也是没有 `codex` 时唯一的官方 gpt-5.5 条目。
+/// `CODEX_CATALOG_PARSER_REQUIRED_FIELDS`。不是本机官方目录的替代品。
 fn load_codex_classic_tool_template() -> Value {
     let text = include_str!("resources/gpt5_5_template.json");
     serde_json::from_str(text).expect("bundled classic tool template must be valid JSON")
@@ -2364,19 +2665,44 @@ pub(crate) fn apply_codex_auto_review_model(catalog: &mut Value, model: &str) ->
     true
 }
 
-/// Codex 自带的 OpenAI 官方模型列表（`codex debug models --bundled`），给第三方的 GPT
-/// 行按模型名找官方条目用。只缓存成功读到的列表：Codex 升级后要重启 CC Switch 才换新。
+/// Successful native rows, invalidated by executable, resolved target, metadata or version.
 #[cfg(not(test))]
-static CODEX_OPENAI_OFFICIAL_MODELS_CACHE: OnceCell<Vec<Value>> = OnceCell::new();
+static CODEX_OPENAI_OFFICIAL_MODELS_CACHE: OnceCell<std::sync::Mutex<CodexOfficialModelsCache>> =
+    OnceCell::new();
+
+#[derive(Default)]
+struct CodexOfficialModelsCache {
+    client: Option<CodexCatalogClient>,
+    rows: Option<Vec<Value>>,
+}
+
+impl CodexOfficialModelsCache {
+    fn models(
+        &mut self,
+        client: Option<CodexCatalogClient>,
+        load: impl FnOnce(&CodexCatalogClient) -> Option<Vec<Value>>,
+    ) -> Vec<Value> {
+        if self.client != client {
+            self.client = client;
+            self.rows = None;
+        }
+        if self.rows.is_none() {
+            self.rows = self.client.as_ref().and_then(load);
+        }
+        self.rows.clone().unwrap_or_default()
+    }
+}
 
 #[cfg(test)]
 thread_local! {
     /// 测试里的官方列表（`None` 时只有编译期内置的 gpt-5.5），不跑本机的 `codex`。
+    static CODEX_CATALOG_CLIENT_VERSION_OVERRIDE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
     static CODEX_OPENAI_OFFICIAL_MODELS_OVERRIDE: std::cell::RefCell<Option<Vec<Value>>> =
         const { std::cell::RefCell::new(None) };
 }
 
-/// 编译期内置的 gpt-5.5：本机没有可用的 `codex` 时唯一的官方条目。
+/// Legacy unit-test default only; production never treats a compiled template as local.
+#[cfg(test)]
 fn codex_static_official_models() -> Vec<Value> {
     normalize_codex_native_rows(vec![load_codex_classic_tool_template()]).unwrap_or_default()
 }
@@ -2385,15 +2711,16 @@ fn codex_static_official_models() -> Vec<Value> {
 /// 写的证明不了（见 `codex_official_models`）。
 #[cfg(not(test))]
 fn codex_openai_official_models() -> Vec<Value> {
+    let client = select_codex_catalog_client(codex_cli_candidates());
     CODEX_OPENAI_OFFICIAL_MODELS_CACHE
-        .get_or_try_init(|| {
-            load_codex_bundled_models()
+        .get_or_init(|| std::sync::Mutex::new(CodexOfficialModelsCache::default()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .models(client, |client| {
+            load_codex_client_bundled_models(client)
                 .ok()
                 .and_then(normalize_codex_native_rows)
-                .ok_or(())
         })
-        .cloned()
-        .unwrap_or_else(|_| codex_static_official_models())
 }
 
 #[cfg(test)]
@@ -2432,7 +2759,7 @@ fn find_codex_official_model<'a>(model: &str, candidates: &'a [Value]) -> Option
 }
 
 /// 第三方供应商上命中官方的 GPT 行：先镜像官方 prompt/tools，移除官方账号/后端字段。
-/// 窗口接受显式覆盖，调用方随后应用校验后的公司 pool 推理档、窗口、speed/service 声明；
+/// 窗口接受显式覆盖，自动服务端能力不覆盖已命中的 native 条目；
 /// 供应商全局窗口最后统一下沉，普通行编辑字段仍不覆盖官方 prompt/tools。
 fn codex_official_model_entry(
     official: &Value,
@@ -2459,8 +2786,8 @@ fn codex_official_model_entry(
     }
     // 官方隐藏的条目用户明确写了，也要出现在选择器里。
     obj.insert("visibility".to_string(), json!("list"));
-    // Account-specific defaults are removed; explicit company pool capabilities
-    // are applied by the caller after mirroring official prompt/tool fields.
+    // Account-specific defaults are removed; automatic company metadata must
+    // not overwrite a matched native row.
     obj.remove("default_service_tier");
     obj.insert("service_tiers".to_string(), json!([]));
     obj.insert("additional_speed_tiers".to_string(), json!([]));
@@ -2549,26 +2876,41 @@ fn codex_catalog_from_specs_for_row(
             codex_openai_official_models()
         }
     };
+    // A snapshot batch probes the selected client at most once, not once per model.
+    let client_version = OnceCell::new();
     let entries: Vec<Value> = specs
         .iter()
         .enumerate()
         .map(|(index, spec)| {
-            let mut entry = match find_codex_official_model(&spec.model, &official) {
-                Some(found) => {
-                    let mut entry = codex_official_model_entry(
-                        found,
+            let local = find_codex_official_model(&spec.model, &official);
+            // Resolve the version only when a snapshot is actually needed.
+            let server = if local.is_none()
+                && matches!(
+                    profile,
+                    CodexCatalogToolProfile::NativeResponses | CodexCatalogToolProfile::ProxyChat
+                ) {
+                spec.capabilities.as_ref().and_then(|caps| {
+                    caps.get("catalog_snapshot")?;
+                    company_snapshot_model(
+                        caps,
                         &spec.model,
-                        index,
-                        profile,
-                        configured_context_window.or(spec.context_window),
-                    );
-                    if let (Some(obj), Some(capabilities)) =
-                        (entry.as_object_mut(), spec.capabilities.as_ref())
-                    {
-                        apply_codex_company_capabilities(obj, capabilities);
-                    }
-                    entry
-                }
+                        client_version
+                            .get_or_init(codex_catalog_client_version)
+                            .as_deref(),
+                    )
+                })
+            } else {
+                None
+            };
+            let native = local.or(server.as_ref());
+            let mut entry = match native {
+                Some(found) => codex_official_model_entry(
+                    found,
+                    &spec.model,
+                    index,
+                    profile,
+                    configured_context_window.or(spec.context_window),
+                ),
                 None => codex_catalog_model_entry(
                     &template,
                     spec,
@@ -2577,19 +2919,12 @@ fn codex_catalog_from_specs_for_row(
                     default_context_window,
                 ),
             };
-            // A changed window needs a matching compaction threshold in single-provider
-            // catalogs too. Otherwise an official/template threshold can stay at 244800
-            // even after the user requests 1M. Keep untouched official defaults intact.
-            let company_window = spec
-                .capabilities
-                .as_ref()
-                .and_then(|capabilities| capabilities.get("context_window"))
-                .and_then(Value::as_u64)
-                .filter(|window| *window > 0 && *window <= i64::MAX as u64);
+            // Native defaults (including compaction) are preserved. Recompute
+            // only for explicit overrides or a synthesized server/fallback row.
             if windows.window.is_some()
                 || windows.limit.is_some()
                 || spec.context_window.is_some()
-                || company_window.is_some()
+                || native.is_none()
             {
                 sink_row_windows(&mut entry, &windows, true);
             }
@@ -5428,7 +5763,7 @@ wire_api = "responses"
     }
 
     #[test]
-    fn company_catalog_preserves_tiers_but_mirrors_official_reasoning() {
+    fn company_catalog_does_not_override_local_capabilities() {
         let tiers = json!([{ "id": "priority", "name": "Fast", "description": "Company pool" }]);
         let models = with_official_models(official_gpt_rows(), || {
             catalog_for(
@@ -5453,13 +5788,13 @@ wire_api = "responses"
             gpt["model_messages"]["instructions_template"],
             "GPT-6 Sol prompt"
         );
-        assert_eq!(gpt["additional_speed_tiers"], json!(["fast"]));
-        assert_eq!(gpt["service_tiers"], tiers);
-        assert_eq!(gpt["default_service_tier"], "priority");
+        assert_eq!(gpt["additional_speed_tiers"], json!([]));
+        assert_eq!(gpt["service_tiers"], json!([]));
+        assert!(gpt.get("default_service_tier").is_none());
     }
 
     #[test]
-    fn company_gpt_catalog_uses_pool_reasoning_and_window_with_official_tools() {
+    fn company_gpt_catalog_prefers_local_reasoning_and_window() {
         let models = with_official_models(official_gpt_rows(), || {
             catalog_for(
                 json!([{ "model": "gpt-6-sol", "capabilities": {
@@ -5479,22 +5814,19 @@ wire_api = "responses"
         let entry = &models[0];
         assert_eq!(
             entry["supported_reasoning_levels"],
-            json!([
-                {"effort": "max", "description": "Pool max"},
-                {"effort": "ultra", "description": "Pool ultra"}
-            ])
+            official_gpt_rows()[1]["supported_reasoning_levels"]
         );
-        assert_eq!(entry["default_reasoning_level"], "ultra");
-        assert_eq!(entry["context_window"], 1_000_000);
-        assert_eq!(entry["max_context_window"], 1_000_000);
-        assert_eq!(entry["auto_compact_token_limit"], 900_000);
+        assert_eq!(entry["default_reasoning_level"], "low");
+        assert_eq!(entry["context_window"], 272_000);
+        assert_eq!(entry["max_context_window"], 872_000);
+        assert_eq!(entry["auto_compact_token_limit"], 244_800);
         assert_eq!(
             entry["model_messages"]["instructions_template"],
             "GPT-6 Sol prompt"
         );
         assert_eq!(entry["apply_patch_tool_type"], "freeform");
-        assert_eq!(entry["additional_speed_tiers"], json!(["fast"]));
-        assert_eq!(entry["service_tiers"][0]["id"], "priority");
+        assert_eq!(entry["additional_speed_tiers"], json!([]));
+        assert_eq!(entry["service_tiers"], json!([]));
     }
 
     #[test]
@@ -5512,7 +5844,7 @@ wire_api = "responses"
                     }
                 }]);
                 for (config, window, limit) in [
-                    ("", 1_000_000, 900_000),
+                    ("", 128_000, 115_200),
                     ("model_context_window = 512000\n", 512_000, 460_800),
                     (
                         "model_context_window = 512000\nmodel_auto_compact_token_limit = 400000\n",
@@ -5524,7 +5856,7 @@ wire_api = "responses"
                     assert_eq!(models[0]["context_window"], window);
                     assert_eq!(models[0]["max_context_window"], window);
                     assert_eq!(models[0]["auto_compact_token_limit"], limit);
-                    assert_eq!(models[0]["additional_speed_tiers"], json!(["fast"]));
+                    assert_eq!(models[0]["additional_speed_tiers"], json!([]));
                     assert_eq!(models[0]["apply_patch_tool_type"], "freeform");
                     assert_eq!(
                         models[0]["model_messages"]["instructions_template"],
@@ -5533,6 +5865,108 @@ wire_api = "responses"
                 }
             }
         });
+    }
+
+    #[test]
+    fn company_missing_local_model_uses_server_then_explicit_then_128k() {
+        with_official_models(vec![], || {
+            for (row, expected, maximum) in [
+                (
+                    json!({"model":"gpt-future", "capabilities":{"context_window":500000,"max_context_window":872000}}),
+                    500000,
+                    872000,
+                ),
+                (
+                    json!({"model":"gpt-future", "contextWindow":300000,"capabilities":{"context_window":500000}}),
+                    300000,
+                    300000,
+                ),
+                (json!({"model":"gpt-future"}), 128000, 128000),
+                (
+                    json!({"model":"gpt-future", "capabilities":{"context_window":-1}}),
+                    128000,
+                    128000,
+                ),
+            ] {
+                let entries =
+                    catalog_for(json!([row]), "", CodexCatalogToolProfile::NativeResponses);
+                assert_eq!(entries[0]["context_window"], expected);
+                assert_eq!(entries[0]["max_context_window"], maximum);
+                assert_eq!(entries[0]["auto_compact_token_limit"], expected * 9 / 10);
+            }
+        });
+    }
+
+    #[test]
+    fn company_native_snapshot_flows_through_catalog_with_version_gate() {
+        let native = official_gpt_row("gpt-future", "server native prompt");
+        let caps = json!({"context_window":500000,"catalog_snapshot":{
+            "schema_version":1,"codex_version":"0.166.0-alpha.5.1","model":native
+        }});
+        let settings =
+            json!({"modelCatalog":{"models":[{"model":"gpt-future","capabilities":caps}]}});
+        with_official_models(vec![], || {
+            CODEX_CATALOG_CLIENT_VERSION_OVERRIDE
+                .with(|slot| *slot.borrow_mut() = Some("0.166.0-alpha.5.1".to_string()));
+            let result = codex_model_catalog_from_settings(
+                &settings,
+                "",
+                CodexCatalogToolProfile::NativeResponses,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(result["models"][0]["context_window"], 272000);
+            assert_eq!(result["models"][0]["max_context_window"], 872000);
+            assert_eq!(result["models"][0]["auto_compact_token_limit"], 244800);
+            assert_eq!(
+                result["models"][0]["base_instructions"],
+                "server native prompt"
+            );
+            CODEX_CATALOG_CLIENT_VERSION_OVERRIDE
+                .with(|slot| *slot.borrow_mut() = Some("0.142.5".to_string()));
+            let result = codex_model_catalog_from_settings(
+                &settings,
+                "",
+                CodexCatalogToolProfile::NativeResponses,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(result["models"][0]["context_window"], 500000);
+            assert_ne!(
+                result["models"][0]["base_instructions"],
+                "server native prompt"
+            );
+            CODEX_CATALOG_CLIENT_VERSION_OVERRIDE.with(|slot| *slot.borrow_mut() = None);
+        });
+    }
+
+    #[test]
+    fn company_native_snapshot_requires_matching_build_and_model() {
+        let row = official_gpt_rows()[1].clone();
+        let caps = json!({"catalog_snapshot": {"schema_version":1,"codex_version":"0.166.0-alpha.5.1", "model":row}});
+        let found = company_snapshot_model(&caps, "gpt-6-sol", Some("0.166.0-alpha.5.1")).unwrap();
+        assert_eq!(found["context_window"], 272000);
+        assert_eq!(found["max_context_window"], 872000);
+        assert_eq!(found["model_messages"], row["model_messages"]);
+        assert!(company_snapshot_model(&caps, "gpt-6-sol", Some("0.142.5")).is_none());
+        assert!(company_snapshot_model(&caps, "gpt-6-sol", None).is_none());
+        assert!(company_snapshot_model(&caps, "gpt-6-luna", Some("0.166.0-alpha.5.1")).is_none());
+        for (field, value) in [
+            ("context_window", json!(0)),
+            ("max_context_window", json!(1)),
+            ("auto_compact_token_limit", json!(-1)),
+            ("effective_context_window_percent", json!(101)),
+            ("supported_reasoning_levels", json!("invalid")),
+            ("input_modalities", json!([false])),
+        ] {
+            let mut malformed = caps.clone();
+            malformed["catalog_snapshot"]["model"][field] = value;
+            assert!(
+                company_snapshot_model(&malformed, "gpt-6-sol", Some("0.166.0-alpha.5.1"))
+                    .is_none(),
+                "{field}"
+            );
+        }
     }
 
     #[test]
@@ -6389,13 +6823,196 @@ wire_api = "responses"
 
     #[test]
     fn codex_cli_candidates_are_non_empty() {
-        let candidates = codex_cli_candidates();
-        assert!(
-            candidates
+        let candidates = ordered_codex_cli_candidates(
+            None,
+            vec![],
+            vec![],
+            CODEX_CLI_FIXED_CANDIDATES
                 .iter()
-                .any(|candidate| candidate == Path::new("codex")),
-            "codex CLI candidates must include the PATH entry"
+                .map(PathBuf::from)
+                .collect(),
         );
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate == Path::new("codex")));
+    }
+
+    #[test]
+    fn codex_discovery_running_bundle_accepts_exact_main_and_cli_paths() {
+        let bundle = Path::new("/Volumes/External Apps/Codex.app");
+        let cli = bundle.join("Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex");
+        let comm = format!(
+            "  {}\n{}\n{}\n/opt/homebrew/bin/codex\n",
+            bundle.join("Contents/MacOS/Codex").display(),
+            cli.display(),
+            cli.display()
+        );
+        let candidates = running_codex_cli_candidates_from_comm(&comm);
+        assert_eq!(candidates.first(), Some(&cli));
+        assert_eq!(candidates.iter().filter(|path| *path == &cli).count(), 1);
+        assert!(candidates.iter().all(|path| path.starts_with(bundle)));
+        let current = running_codex_cli_candidates_from_comm(
+            "/Users/test/Applications/ChatGPT.app/Contents/MacOS/ChatGPT\n",
+        );
+        assert_eq!(
+            current.first(),
+            Some(&PathBuf::from(
+                "/Users/test/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex"
+            ))
+        );
+        let legacy = "/Applications/Codex.app/Contents/Resources/codex";
+        assert_eq!(
+            running_codex_cli_candidates_from_comm(legacy).first(),
+            Some(&PathBuf::from(legacy))
+        );
+    }
+
+    #[test]
+    fn codex_discovery_running_bundle_rejects_ambiguous_installations() {
+        for comm in [
+            "/Applications/Codex.app/Contents/MacOS/Codex\n/Applications/ChatGPT.app/Contents/MacOS/ChatGPT",
+            "/Applications/Codex.app/Contents/MacOS/Codex\n/Users/test/Applications/Codex.app/Contents/Resources/codex",
+        ] {
+            assert!(running_codex_cli_candidates_from_comm(comm).is_empty());
+        }
+    }
+
+    #[test]
+    fn codex_discovery_running_bundle_ignores_unrecognized_paths_and_arguments() {
+        for comm in [
+            "",
+            "codex",
+            "/opt/homebrew/bin/codex",
+            "Applications/Codex.app/Contents/MacOS/Codex",
+            "/Applications/NotCodex.app/Contents/MacOS/Codex",
+            "/Applications/Codex.app/Contents/MacOS/ChatGPT",
+            "/Applications/Codex.app/Contents/MacOS/Codex Helper",
+            "/Applications/Codex.app/Contents/Resources/codex-extra",
+            "/Applications/Codex.app/Contents/Resources/codex --token=secret",
+            "/Applications/Codex.app/Contents/Resources/../Resources/codex",
+        ] {
+            assert!(
+                running_codex_cli_candidates_from_comm(comm).is_empty(),
+                "{comm}"
+            );
+        }
+    }
+
+    #[test]
+    fn codex_discovery_version_parser_requires_exact_cli_identity() {
+        assert_eq!(
+            parse_codex_client_version(b"codex-cli 0.162.0\n"),
+            Some("0.162.0".into())
+        );
+        assert_eq!(
+            parse_codex_client_version(b"codex-cli 0.162.0-alpha.2+build.1"),
+            Some("0.162.0-alpha.2+build.1".into())
+        );
+        for output in [
+            "node 22.0.0",
+            "codex-cli unknown",
+            "codex-cli 0.162",
+            "codex-cli 0.162.0 extra",
+            "",
+        ] {
+            assert_eq!(parse_codex_client_version(output.as_bytes()), None);
+        }
+    }
+
+    #[test]
+    fn codex_discovery_cache_invalidates_identity_and_retries_failures() {
+        let client = CodexCatalogClient {
+            executable: "/fixture/codex".into(),
+            resolved: "/fixture/version-a/codex".into(),
+            modified: Some(std::time::SystemTime::UNIX_EPOCH),
+            size: 100,
+            version: "0.162.0".into(),
+        };
+        let rows = vec![json!({"slug": "fixture"})];
+        let mut cache = CodexOfficialModelsCache::default();
+        assert_eq!(
+            cache.models(Some(client.clone()), |_| Some(rows.clone())),
+            rows
+        );
+        assert_eq!(
+            cache.models(Some(client.clone()), |_| panic!("cache miss")),
+            rows
+        );
+        for changed in [
+            CodexCatalogClient {
+                executable: "/other/codex".into(),
+                ..client.clone()
+            },
+            CodexCatalogClient {
+                resolved: "/fixture/version-b/codex".into(),
+                ..client.clone()
+            },
+            CodexCatalogClient {
+                version: "0.163.0".into(),
+                ..client.clone()
+            },
+            CodexCatalogClient {
+                modified: None,
+                ..client.clone()
+            },
+            CodexCatalogClient {
+                size: 101,
+                ..client.clone()
+            },
+        ] {
+            let mut cache = CodexOfficialModelsCache::default();
+            cache.models(Some(client.clone()), |_| Some(rows.clone()));
+            let mut loaded = false;
+            assert_eq!(
+                cache.models(Some(changed), |_| {
+                    loaded = true;
+                    Some(rows.clone())
+                }),
+                rows
+            );
+            assert!(loaded);
+        }
+        assert!(cache.models(None, |_| panic!("missing client")).is_empty());
+        assert!(cache.models(Some(client.clone()), |_| None).is_empty());
+        assert_eq!(cache.models(Some(client), |_| Some(rows.clone())), rows);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn codex_discovery_selected_version_and_catalog_share_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = |name: &str, version: &str, catalog: &str| {
+            let path = dir.path().join(name);
+            fs::write(&path, format!(
+                "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'codex-cli {version}'; else {catalog}; fi\n"
+            )).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        let desktop = script("desktop", "0.162.0", "exit 1");
+        let standalone = script(
+            "standalone",
+            "0.99.0",
+            "echo '{\"models\":[{\"slug\":\"old\"}]}'",
+        );
+        let selected =
+            select_codex_catalog_client(vec![desktop.clone(), standalone.clone()]).unwrap();
+        assert_eq!(selected.executable, desktop);
+        assert_eq!(selected.version, "0.162.0");
+        assert!(matches!(
+            load_codex_client_bundled_models(&selected),
+            Err(CodexBundledModelsError::Failed(_))
+        ));
+        // No fallback to the old standalone catalog just because export failed.
+        fs::remove_file(&desktop).unwrap();
+        let fallback = select_codex_catalog_client(vec![desktop, standalone]).unwrap();
+        assert_eq!(fallback.version, "0.99.0");
+        assert_eq!(
+            load_codex_client_bundled_models(&fallback).unwrap(),
+            vec![json!({"slug":"old"})]
+        );
+        assert!(select_codex_catalog_client(vec![dir.path().join("missing")]).is_none());
     }
 
     #[test]
@@ -6569,29 +7186,20 @@ wire_api = "responses"
     }
 
     #[test]
-    #[serial]
-    fn codex_cli_candidates_try_the_desktop_app_cli_after_standalone_installs() {
-        let test_home = CodexLiveTestHome::new();
-        let home = test_home._dir.path();
-        let standalone = home.join(".volta/bin/codex");
-        let desktop = desktop_cli(
-            &home.join("Applications"),
-            "ChatGPT.app",
-            CODEX_DESKTOP_CLI_IN_BUNDLE[0],
+    fn codex_cli_candidates_prefer_override_then_running_then_desktop_then_standalone() {
+        let explicit = PathBuf::from("/selected/codex");
+        let running = PathBuf::from("/running/codex");
+        let desktop = PathBuf::from("/desktop/codex");
+        let standalone = PathBuf::from("/homebrew/codex");
+        assert_eq!(
+            ordered_codex_cli_candidates(
+                Some(explicit.clone()),
+                vec![running.clone(), explicit.clone()],
+                vec![desktop.clone(), running.clone(), explicit.clone()],
+                vec![standalone.clone(), desktop.clone()],
+            ),
+            vec![explicit, running, desktop, standalone],
         );
-        create_cli_candidate(&standalone);
-        create_cli_candidate(&desktop);
-
-        let candidates = codex_cli_candidates();
-        let position = |path: &Path| {
-            candidates
-                .iter()
-                .position(|candidate| candidate == path)
-                .unwrap_or_else(|| panic!("missing candidate {}", path.display()))
-        };
-
-        // 装了独立 CLI 的人照旧先用它，桌面版的只做兜底。
-        assert!(position(&standalone) < position(&desktop));
     }
 
     #[test]

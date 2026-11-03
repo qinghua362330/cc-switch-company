@@ -1,0 +1,345 @@
+{
+  "date": "2026-11-03",
+  "scope": "Synthetic company endpoint compaction and isolated desktop engine; not a live old-chat recovery test",
+  "catalog": {
+    "date": "2026-11-03T07:02:38.073510+00:00",
+    "endpoint": "https://leharrt.com/v1/responses",
+    "synthetic_only": true,
+    "cases": [
+      {
+        "model": "gpt-6.1-terra",
+        "pass": true,
+        "compact": {
+          "curl_exit": 0,
+          "http": "200",
+          "seconds": "2.317937",
+          "completed": true,
+          "output_types": [
+            "compaction"
+          ]
+        },
+        "encrypted_compaction_count": 1,
+        "continuation": {
+          "curl_exit": 0,
+          "http": "200",
+          "seconds": "1.816966",
+          "completed": true,
+          "output_types": [
+            "message"
+          ]
+        },
+        "sentinel_recovered": true,
+        "old_assistant_history_sent": false
+      },
+      {
+        "model": "gpt-5.6-luna",
+        "pass": true,
+        "compact": {
+          "curl_exit": 0,
+          "http": "200",
+          "seconds": "3.938782",
+          "completed": true,
+          "output_types": [
+            "compaction"
+          ]
+        },
+        "encrypted_compaction_count": 1,
+        "continuation": {
+          "curl_exit": 0,
+          "http": "200",
+          "seconds": "1.605542",
+          "completed": true,
+          "output_types": [
+            "message"
+          ]
+        },
+        "sentinel_recovered": true,
+        "old_assistant_history_sent": false
+      },
+      {
+        "model": "codex-auto-review",
+        "pass": true,
+        "compact": {
+          "curl_exit": 0,
+          "http": "200",
+          "seconds": "3.273770",
+          "completed": true,
+          "output_types": [
+            "compaction"
+          ]
+        },
+        "encrypted_compaction_count": 1,
+        "continuation": {
+          "curl_exit": 0,
+          "http": "200",
+          "seconds": "1.727900",
+          "completed": true,
+          "output_types": [
+            "message"
+          ]
+        },
+        "sentinel_recovered": true,
+        "old_assistant_history_sent": false
+      },
+      {
+        "model": "gpt-5.6-sol",
+        "pass": true,
+        "compact": {
+          "curl_exit": 0,
+          "http": "200",
+          "seconds": "2.246750",
+          "completed": true,
+          "output_types": [
+            "compaction"
+          ]
+        },
+        "encrypted_compaction_count": 1,
+        "continuation": {
+          "curl_exit": 0,
+          "http": "200",
+          "seconds": "3.534202",
+          "completed": true,
+          "output_types": [
+            "message"
+          ]
+        },
+        "sentinel_recovered": true,
+        "old_assistant_history_sent": false
+      },
+      {
+        "model": "gpt-6-sol",
+        "pass": true,
+        "compact": {
+          "curl_exit": 0,
+          "http": "200",
+          "seconds": "2.602881",
+          "completed": true,
+          "output_types": [
+            "compaction"
+          ]
+        },
+        "encrypted_compaction_count": 1,
+        "continuation": {
+          "curl_exit": 0,
+          "http": "200",
+          "seconds": "2.047711",
+          "completed": true,
+          "output_types": [
+            "message"
+          ]
+        },
+        "sentinel_recovered": true,
+        "old_assistant_history_sent": false
+      },
+      {
+        "model": "gpt-6.1-sol",
+        "pass": true,
+        "compact": {
+          "curl_exit": 0,
+          "http": "200",
+          "seconds": "4.566875",
+          "completed": true,
+          "output_types": [
+            "compaction"
+          ]
+        },
+        "encrypted_compaction_count": 1,
+        "continuation": {
+          "curl_exit": 0,
+          "http": "200",
+          "seconds": "1.909177",
+          "completed": true,
+          "output_types": [
+            "message"
+          ]
+        },
+        "sentinel_recovered": true,
+        "old_assistant_history_sent": false
+      },
+      {
+        "model": "gpt-6-astra",
+        "pass": true,
+        "compact": {
+          "curl_exit": 0,
+          "http": "200",
+          "seconds": "6.156772",
+          "completed": true,
+          "output_types": [
+            "compaction"
+          ]
+        },
+        "encrypted_compaction_count": 1,
+        "continuation": {
+          "curl_exit": 0,
+          "http": "200",
+          "seconds": "2.238468",
+          "completed": true,
+          "output_types": [
+            "message"
+          ]
+        },
+        "sentinel_recovered": true,
+        "old_assistant_history_sent": false
+      },
+      {
+        "model": "gpt-6-luna",
+        "pass": true,
+        "compact": {
+          "curl_exit": 0,
+          "http": "200",
+          "seconds": "3.714114",
+          "completed": true,
+          "output_types": [
+            "compaction"
+          ]
+        },
+        "encrypted_compaction_count": 1,
+        "continuation": {
+          "curl_exit": 0,
+          "http": "200",
+          "seconds": "2.494217",
+          "completed": true,
+          "output_types": [
+            "message"
+          ]
+        },
+        "sentinel_recovered": true,
+        "old_assistant_history_sent": false
+      },
+      {
+        "model": "gpt-5.6-terra",
+        "pass": true,
+        "compact": {
+          "curl_exit": 0,
+          "http": "200",
+          "seconds": "10.346111",
+          "completed": true,
+          "output_types": [
+            "compaction"
+          ]
+        },
+        "encrypted_compaction_count": 1,
+        "continuation": {
+          "curl_exit": 0,
+          "http": "200",
+          "seconds": "4.054768",
+          "completed": true,
+          "output_types": [
+            "reasoning",
+            "message"
+          ]
+        },
+        "sentinel_recovered": true,
+        "old_assistant_history_sent": false
+      }
+    ]
+  },
+  "images": [
+    {
+      "case": "user_image",
+      "compact": {
+        "curl_exit": 0,
+        "http": "200",
+        "seconds": "3.481053",
+        "completed": true,
+        "output_types": [
+          "compaction"
+        ]
+      },
+      "encrypted_compaction_count": 1,
+      "pass": true,
+      "continuation": {
+        "curl_exit": 0,
+        "http": "200",
+        "seconds": "1.633059",
+        "completed": true,
+        "output_types": [
+          "message"
+        ]
+      },
+      "sentinel_recovered": true,
+      "old_assistant_and_tool_history_sent": false
+    },
+    {
+      "case": "tool_image",
+      "compact": {
+        "curl_exit": 0,
+        "http": "200",
+        "seconds": "2.535681",
+        "completed": true,
+        "output_types": [
+          "compaction"
+        ]
+      },
+      "encrypted_compaction_count": 1,
+      "pass": true,
+      "continuation": {
+        "curl_exit": 0,
+        "http": "200",
+        "seconds": "1.699674",
+        "completed": true,
+        "output_types": [
+          "message"
+        ]
+      },
+      "sentinel_recovered": true,
+      "old_assistant_and_tool_history_sent": false
+    }
+  ],
+  "engine_text": {
+    "status": "passed",
+    "scope": "synthetic-loopback-desktop-engine",
+    "live_ui_verified": false,
+    "upstream_semantics_verified": false,
+    "tool_history_verified": false,
+    "binary_sha256": "58a91f6ea19bea477ae3a2ec48d619f0039afe75d3476260747e11d201fa7cea",
+    "checks": {
+      "v2_trigger": true,
+      "compaction_output": true,
+      "continuation_uses_compaction": true,
+      "old_assistant_not_repeated": true,
+      "user_history_retained": true,
+      "dummy_auth_only": true,
+      "responses_only": true
+    },
+    "synthetic_tool_call_count": 0,
+    "request_count": 3,
+    "network_policy": "OS sandbox: selected loopback port only",
+    "config_preserved": {
+      "provider_identity": true,
+      "model": true,
+      "capabilities": true,
+      "websocket_settings": true,
+      "storage_settings": true
+    }
+  },
+  "engine_tool": {
+    "status": "passed",
+    "scope": "synthetic-loopback-desktop-engine",
+    "live_ui_verified": false,
+    "upstream_semantics_verified": false,
+    "tool_history_verified": true,
+    "binary_sha256": "58a91f6ea19bea477ae3a2ec48d619f0039afe75d3476260747e11d201fa7cea",
+    "checks": {
+      "v2_trigger": true,
+      "compaction_output": true,
+      "continuation_uses_compaction": true,
+      "old_assistant_not_repeated": true,
+      "user_history_retained": true,
+      "dummy_auth_only": true,
+      "responses_only": true,
+      "tool_history_before_compaction": true,
+      "old_tool_history_not_repeated": true
+    },
+    "synthetic_tool_call_count": 1,
+    "request_count": 4,
+    "network_policy": "OS sandbox: selected loopback port only",
+    "config_preserved": {
+      "provider_identity": true,
+      "model": true,
+      "capabilities": true,
+      "websocket_settings": true,
+      "storage_settings": true
+    }
+  }
+}

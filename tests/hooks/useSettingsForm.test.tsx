@@ -28,51 +28,37 @@ afterEach(() => {
 });
 
 describe("useSettingsForm Hook", () => {
-  it.each([
-    [false, false],
-    [false, true],
-    [true, false],
-    [true, true],
-  ])(
-    "preserves explicit automatic switching %s with login preservation %s on load and reset",
-    (enabled, preserveLogin) => {
+  it.each([false, true])(
+    "preserves explicit upstream protection %s on load and reset",
+    (enabled) => {
       const data = {
         showInTray: true,
         minimizeToTrayOnClose: true,
-        codexQuotaAutoFallback: enabled,
-        preserveCodexOfficialAuthOnSwitch: preserveLogin,
-        unifyCodexSessionHistory: !preserveLogin,
+        codexQuotaProtection: {
+          enabled,
+          fiveHourThreshold: 95,
+          weeklyThreshold: 98,
+        },
       };
       useSettingsQueryMock.mockReturnValue({ data, isLoading: false });
       const { result } = renderHook(() => useSettingsForm());
-      expect(result.current.settings?.codexQuotaAutoFallback).toBe(enabled);
-      expect(result.current.settings?.preserveCodexOfficialAuthOnSwitch).toBe(
-        preserveLogin,
-      );
-      expect(result.current.settings?.unifyCodexSessionHistory).toBe(
-        !preserveLogin,
+      expect(result.current.settings?.codexQuotaProtection?.enabled).toBe(
+        enabled,
       );
       act(() =>
         result.current.updateSettings({
-          codexQuotaAutoFallback: !enabled,
-          preserveCodexOfficialAuthOnSwitch: !preserveLogin,
-          unifyCodexSessionHistory: preserveLogin,
+          codexQuotaProtection: {
+            ...data.codexQuotaProtection,
+            enabled: !enabled,
+          },
         }),
       );
-      expect(result.current.settings?.codexQuotaAutoFallback).toBe(!enabled);
-      expect(result.current.settings?.preserveCodexOfficialAuthOnSwitch).toBe(
-        !preserveLogin,
-      );
-      expect(result.current.settings?.unifyCodexSessionHistory).toBe(
-        preserveLogin,
+      expect(result.current.settings?.codexQuotaProtection?.enabled).toBe(
+        !enabled,
       );
       act(() => result.current.resetSettings(data));
-      expect(result.current.settings?.codexQuotaAutoFallback).toBe(enabled);
-      expect(result.current.settings?.preserveCodexOfficialAuthOnSwitch).toBe(
-        preserveLogin,
-      );
-      expect(result.current.settings?.unifyCodexSessionHistory).toBe(
-        !preserveLogin,
+      expect(result.current.settings?.codexQuotaProtection?.enabled).toBe(
+        enabled,
       );
     },
   );
@@ -100,7 +86,7 @@ describe("useSettingsForm Hook", () => {
     expect(settings.showInTray).toBe(true);
     expect(settings.minimizeToTrayOnClose).toBe(true);
     expect(settings.enableClaudePluginIntegration).toBe(false);
-    expect(settings.codexQuotaAutoFallback).toBe(true);
+    expect(settings.codexQuotaProtection?.enabled).not.toBe(true);
     expect(settings.preserveCodexOfficialAuthOnSwitch).toBe(true);
     expect(settings.unifyCodexSessionHistory).toBe(true);
     expect(settings.codexStackClassicTools).toBe(true);
@@ -195,7 +181,9 @@ describe("useSettingsForm Hook", () => {
     });
 
     expect(result.current.settings?.showInTray).toBe(false);
-    expect(result.current.settings?.codexQuotaAutoFallback).toBe(true);
+    expect(result.current.settings?.codexQuotaProtection?.enabled).not.toBe(
+      true,
+    );
     expect(result.current.settings?.preserveCodexOfficialAuthOnSwitch).toBe(
       true,
     );
@@ -249,7 +237,7 @@ describe("useSettingsForm Hook", () => {
     expect(settings.showInTray).toBe(false);
     expect(settings.minimizeToTrayOnClose).toBe(false);
     expect(settings.enableClaudePluginIntegration).toBe(true);
-    expect(settings.codexQuotaAutoFallback).toBe(true);
+    expect(settings.codexQuotaProtection?.enabled).not.toBe(true);
     expect(settings.preserveCodexOfficialAuthOnSwitch).toBe(true);
     expect(settings.unifyCodexSessionHistory).toBe(true);
     expect(settings.codexStackClassicTools).toBe(true);

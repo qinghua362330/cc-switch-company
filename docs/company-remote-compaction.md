@@ -2,16 +2,40 @@
 
 ## Scope
 
-The verified production route is HTTPS `leharrt.com/v1`, model
-`gpt-5.6-sol`, using streaming Responses. The company catalog currently mixes
-this model with unverified GPT aliases, DeepSeek, Gemini, and GLM models.
-Compaction is a provider-level capability, not a model-level catalog property.
+The verified production route is HTTPS `leharrt.com/v1`, using streaming
+Responses. The explicit verified set (2026-11-03) is:
 
-The existing mixed card remains unchanged and selected. Catalog refresh adds a
-separate company card whose label ends in `远程压缩 V2`, containing only the
-verified model. Select that card explicitly. Refresh preserves its identity and
-rotates its credentials, including when the parent catalog later becomes
-single-model. A single-model verified company card also receives V2 directly.
+- `gpt-6.1-terra`
+- `gpt-5.6-luna`
+- `codex-auto-review`
+- `gpt-5.6-sol`
+- `gpt-6-sol`
+- `gpt-6.1-sol`
+- `gpt-6-astra`
+- `gpt-6-luna`
+- `gpt-5.6-terra`
+
+The existing mixed card and the separate card whose label ends in `远程压缩 V2`
+keep their names and label-derived IDs. Refresh expands the V2 card to the
+intersection of the offered catalog and this verified set, preserving catalog
+order and matching per-model metadata. It does not rename or split the mixed
+card, change the selected card, or migrate Stack ownership. Both existing cards
+continue to receive credential refreshes, including when the parent catalog
+shrinks to one verified model.
+
+`gpt-5.6-sol` remains the V2 card's preferred default when offered. Without Sol,
+the offered verified default is retained; otherwise the first offered verified
+model is used. Unknown future GPT models and aliases are not admitted based on
+prefixes. A catalog with no verified models produces no new derived card;
+existing stale-card retention is unchanged.
+
+Generation and startup normalization share a fail-closed catalog check: the
+selected model must be present, every catalog row must be verified, and the
+catalog must be nonempty. A verified-only company card can receive V2 directly;
+a mixed card containing unverified models cannot. Unknown or malformed rows,
+an unsupported selected model, changed route/protocol, or a foreign catalog
+prevent automatic V2; normalization revokes an existing capability to
+`unsupported`. Compaction remains a provider-level capability.
 
 Generated configuration keeps the company display name and uses the selected
 provider ID:
@@ -41,6 +65,24 @@ without a writable provider capability table cannot safely express this new
 mixed configuration and is rejected without changing the session selector.
 
 ## Evidence And Limits
+
+On 2026-11-03 the sanitized repository report
+[`docs/test-results/company-v2-catalog-20261103.json`](test-results/company-v2-catalog-20261103.json)
+recorded successful
+checks for all nine entries above against the exact company endpoint, using the
+saved V2 card's API credentials and synthetic history. Each case returned an
+encrypted compaction item, completed continuation, and recovered its sentinel
+without resending old assistant history. This patch uses that existing evidence;
+it does not rerun paid probes or establish support for future aliases. The
+multi-model evidence does not extend the image-fixture results to all nine
+models.
+
+The same-day report also records passing user-image and tool-image compaction
+and sentinel recovery for Sol, plus passing isolated desktop-engine text and
+tool-history tests. The engine checks use dummy authentication and loopback-only
+network access; they verify V2 triggering, compaction continuation, retained user
+history, and omission of old assistant/tool history. They do not verify live UI
+behavior, upstream semantics, or recovery of a real existing conversation.
 
 On 2026-11-02 the separate production probe returned encrypted `compaction`
 items and completed successfully for text, user-image, and tool-image fixtures.

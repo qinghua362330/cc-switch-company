@@ -7,6 +7,7 @@ import {
   UsageDashboard,
   resetUsageSyncClockForTests,
 } from "@/components/usage/UsageDashboard";
+import { USAGE_CHOICE_KEYS } from "@/components/usage/rememberedChoice";
 import type { UsageRangeSelection } from "@/types/usage";
 import { setSettings } from "../msw/state";
 
@@ -185,6 +186,11 @@ const syncButton = () =>
 
 describe("UsageDashboard", () => {
   beforeEach(() => {
+    // Storage polyfills may not expose saved entries through Object.keys.
+    // Reset between tests, but preserve choices across remounts within a test.
+    for (const key of Object.values(USAGE_CHOICE_KEYS)) {
+      window.localStorage.removeItem(key);
+    }
     resetUsageSyncClockForTests();
     useProviderStatsMock.mockReset();
     useModelStatsMock.mockReset();

@@ -204,6 +204,12 @@ export const normalizeCodexCatalogModelsForSave = (
 
     normalized.push({
       model,
+      // Preserve fallback metadata without elevating it to explicit overrides.
+      ...(item.capabilities &&
+      typeof item.capabilities === "object" &&
+      !Array.isArray(item.capabilities)
+        ? { capabilities: item.capabilities }
+        : {}),
       ...(displayName ? { displayName } : {}),
       ...(contextWindow && contextWindow > 0 ? { contextWindow } : {}),
       // Native Responses profile overrides (ignored by the chat/proxy profile).
@@ -778,6 +784,8 @@ function ProviderFormFull({
     codexModel,
     codexSubagentModel,
     codexSubagentReasoningEffort,
+    codexAgentMaxThreads,
+    codexMultiAgentV2Total,
     codexCatalogModels,
     codexAutoReviewModel,
     codexAuthError,
@@ -790,6 +798,7 @@ function ProviderFormFull({
     handleCodexModelChange,
     handleCodexSubagentModelChange,
     handleCodexSubagentReasoningEffortChange,
+    handleCodexAgentMaxThreadsChange,
     handleCodexConfigChange: originalHandleCodexConfigChange,
     resetCodexConfig,
   } = useCodexConfigState({ initialData });
@@ -2853,6 +2862,9 @@ function ProviderFormFull({
               onSubagentReasoningEffortChange={
                 handleCodexSubagentReasoningEffortChange
               }
+              agentMaxThreads={codexAgentMaxThreads}
+              multiAgentV2Total={codexMultiAgentV2Total}
+              onAgentMaxThreadsChange={handleCodexAgentMaxThreadsChange}
               apiFormat={localCodexApiFormat}
               onApiFormatChange={handleCodexApiFormatChange}
               copilotApiFormat={effectiveCodexCopilotApiFormat}

@@ -310,25 +310,6 @@ describe("App integration with MSW", () => {
   });
 
   it.each([
-    [true, "settings.codexQuotaFallbackActive"],
-    [false, "settings.codexQuotaFallbackInactive"],
-  ])(
-    "reports quota fallback configuration status %s without claiming live success",
-    async (active, key) => {
-      await renderAppWithSubscription(App, "codex-quota-fallback-changed");
-      await act(async () => {
-        emitTauriEvent("codex-quota-fallback-changed", { active });
-      });
-      expect(toastInfoMock).toHaveBeenCalledTimes(1);
-      expect(toastInfoMock).toHaveBeenCalledWith(key, {
-        duration: 8000,
-      });
-      expect(toastSuccessMock).not.toHaveBeenCalled();
-    },
-    15000,
-  );
-
-  it.each([
     ["waiting", "settings.codexLoginModeRefreshWaiting"],
     ["reloaded", "settings.codexLoginModeRefreshReloaded"],
     ["manual", "settings.codexLoginModeRefreshManual"],

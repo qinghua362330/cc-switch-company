@@ -127,7 +127,10 @@ fn sync_company_providers(
             let (app_type, provider) =
                 company_catalog_provider(&compaction_entry, login, created_at)
                     .expect("derived Codex catalog entry");
-            if entry.models.iter().any(|m| m != VERIFIED_COMPACTION_MODEL)
+            if entry
+                .models
+                .iter()
+                .any(|m| m != &compaction_entry.default_model)
                 || state
                     .db
                     .get_provider_by_id(&provider.id, app_type.as_str())?
@@ -165,7 +168,43 @@ fn sync_company_providers(
 }
 
 const STALE_COMPANY_NOTE: &str = "已从公司目录移除（保留本地配置）";
+// Keep the old default and label-derived card identity when expanding its catalog.
 const VERIFIED_COMPACTION_MODEL: &str = "gpt-5.6-sol";
+// Exact production compaction + continuation verification, 2026-11-03.
+// A model prefix or server catalog membership alone does not establish support.
+const VERIFIED_COMPACTION_MODELS: &[&str] = &[
+    "gpt-6.1-terra",
+    "gpt-5.6-luna",
+    "codex-auto-review",
+    "gpt-5.6-sol",
+    "gpt-6-sol",
+    "gpt-6.1-sol",
+    "gpt-6-astra",
+    "gpt-6-luna",
+    "gpt-5.6-terra",
+];
+
+fn verified_compaction_model(model: &str) -> bool {
+    VERIFIED_COMPACTION_MODELS.contains(&model)
+}
+
+fn verified_compaction_catalog<'a>(
+    selected: Option<&str>,
+    models: impl IntoIterator<Item = Option<&'a str>>,
+) -> bool {
+    let Some(selected) = selected.filter(|model| verified_compaction_model(model)) else {
+        return false;
+    };
+    let mut contains_selected = false;
+    for model in models {
+        let Some(model) = model.filter(|model| verified_compaction_model(model)) else {
+            return false;
+        };
+        contains_selected |= model == selected;
+    }
+    // Empty, malformed, unverified and externally selected models fail closed.
+    contains_selected
+}
 
 fn verified_compaction_base(base: &str) -> bool {
     url::Url::parse(base).is_ok_and(|url| {
@@ -186,16 +225,30 @@ fn company_compaction_entry(entry: &CatalogEntry, base: &str) -> Option<CatalogE
         "codex" | "openai-codex" | "openai_codex"
     ) || !entry.protocol.eq_ignore_ascii_case("openai-responses")
         || !verified_compaction_base(base)
-        || !entry.models.iter().any(|m| m == VERIFIED_COMPACTION_MODEL)
     {
         return None;
     }
     let mut derived = entry.clone();
     derived.label = format!("{} · 远程压缩 V2", entry.label);
-    derived.models = vec![VERIFIED_COMPACTION_MODEL.to_string()];
-    derived.default_model = VERIFIED_COMPACTION_MODEL.to_string();
+    derived
+        .models
+        .retain(|model| verified_compaction_model(model));
+    if derived.models.is_empty() {
+        return None;
+    }
+    derived.default_model = if derived
+        .models
+        .iter()
+        .any(|m| m == VERIFIED_COMPACTION_MODEL)
+    {
+        VERIFIED_COMPACTION_MODEL.to_string()
+    } else if derived.models.contains(&entry.default_model) {
+        entry.default_model.clone()
+    } else {
+        derived.models[0].clone()
+    };
     if let Some(caps) = derived.model_capabilities.as_mut() {
-        caps.retain(|model, _| model == VERIFIED_COMPACTION_MODEL);
+        caps.retain(|model, _| derived.models.contains(model));
     }
     Some(derived)
 }
@@ -206,6 +259,52 @@ fn is_company_provider(provider: &Provider) -> bool {
             || (meta.provider_type.is_none()
                 && meta.partner_promotion_key.as_deref() == Some("company_pool"))
     })
+}
+
+/// Only explicit form fields survive an automatic company catalog refresh.
+fn preserve_company_catalog_overrides(old: Option<&Value>, settings: &mut Value) {
+    let Some(old_rows) = old
+        .and_then(|catalog| catalog.get("models"))
+        .and_then(Value::as_array)
+    else {
+        return;
+    };
+    let Some(new_rows) = settings
+        .get_mut("modelCatalog")
+        .and_then(|catalog| catalog.get_mut("models"))
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    for row in new_rows {
+        let Some(model) = row.get("model").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(previous) = old_rows
+            .iter()
+            .find(|old| old.get("model").and_then(Value::as_str) == Some(model))
+        else {
+            continue;
+        };
+        let Some(object) = row.as_object_mut() else {
+            continue;
+        };
+        // Match the parser's camelCase-first alias precedence, and normalize
+        // saved overrides without retaining stale automatic capabilities.
+        for (key, alias) in [
+            ("displayName", "display_name"),
+            ("contextWindow", "context_window"),
+            ("supportsParallelToolCalls", "supports_parallel_tool_calls"),
+            ("inputModalities", "input_modalities"),
+            ("baseInstructions", "base_instructions"),
+            ("reasoningLevels", "reasoning_levels"),
+            ("defaultReasoningLevel", "default_reasoning_level"),
+        ] {
+            if let Some(value) = previous.get(key).or_else(|| previous.get(alias)) {
+                object.insert(key.to_string(), value.clone());
+            }
+        }
+    }
 }
 
 fn upsert_company_provider(
@@ -249,8 +348,14 @@ fn upsert_company_provider(
                         .and_then(|v| v.as_bool())
                         == Some(false)
                 });
+        let old_catalog = existing.settings_config.get("modelCatalog").cloned();
         existing.name = provider.name;
         existing.settings_config = provider.settings_config;
+        // Refresh automatic metadata, but keep explicit edits for models that
+        // still exist. Never copy old capabilities: they may be stale.
+        if matches!(app_type, AppType::Codex) {
+            preserve_company_catalog_overrides(old_catalog.as_ref(), &mut existing.settings_config);
+        }
         if preserve_disabled_websocket {
             if let Some(config) = existing
                 .settings_config
@@ -273,6 +378,14 @@ fn upsert_company_provider(
                     .and_then(Value::as_str),
             ) {
                 if let Ok(mut new) = new_text.parse::<DocumentMut>() {
+                    for key in ["model_context_window", "model_auto_compact_token_limit"] {
+                        if let Some(value) = old
+                            .get(key)
+                            .filter(|value| value.as_integer().is_some_and(|n| n > 0))
+                        {
+                            new[key] = value.clone();
+                        }
+                    }
                     if let Some(features) = old.get("features").and_then(|v| v.as_table_like()) {
                         let mut retained = toml_edit::Table::new();
                         for (key, value) in features
@@ -421,7 +534,7 @@ fn company_codex_settings(entry: &CatalogEntry, login: &LoginResponse) -> Value 
                 "displayName": model
             });
             // 服务端声明了该模型的能力就原样带上，供生成 Codex catalog 时使用。
-            // 号池支持什么由服务端说了算，不再依赖使用者个人账号的本机缓存。
+            // 自动快照仅作为本机 bundled 目录未命中时的兜底，不提升为用户显式覆盖。
             if let Some(caps) = entry
                 .model_capabilities
                 .as_ref()
@@ -454,12 +567,10 @@ fn company_codex_settings(entry: &CatalogEntry, login: &LoginResponse) -> Value 
     );
     if entry.protocol.eq_ignore_ascii_case("openai-responses")
         && verified_compaction_base(&login.base_url)
-        && entry.default_model == VERIFIED_COMPACTION_MODEL
-        && !entry.models.is_empty()
-        && entry
-            .models
-            .iter()
-            .all(|model| model == VERIFIED_COMPACTION_MODEL)
+        && verified_compaction_catalog(
+            Some(&entry.default_model),
+            entry.models.iter().map(|model| Some(model.as_str())),
+        )
     {
         config.push_str("\n[model_providers.custom.capabilities]\nremote_compaction = \"v2\"\n");
     }
@@ -543,13 +654,12 @@ pub fn normalize_company_codex_providers(
                     == Some("openai_responses")
                     && crate::live::project::codex::foreign_catalog(&doc).is_none()
                     && base.is_some_and(verified_compaction_base)
-                    && doc.get("model").and_then(|v| v.as_str()) == Some(VERIFIED_COMPACTION_MODEL)
                     && models.is_some_and(|rows| {
-                        !rows.is_empty()
-                            && rows.iter().all(|v| {
-                                v.get("model").and_then(Value::as_str)
-                                    == Some(VERIFIED_COMPACTION_MODEL)
-                            })
+                        verified_compaction_catalog(
+                            doc.get("model").and_then(|v| v.as_str()),
+                            rows.iter()
+                                .map(|row| row.get("model").and_then(Value::as_str)),
+                        )
                     });
                 if supported {
                     doc["model_providers"][&name]["capabilities"]["remote_compaction"] =
@@ -1037,8 +1147,10 @@ mod tests {
         let _home = IsolatedHome::new();
         let state = test_state();
         let mut login = sample_login();
+        login.catalog[0].default_model = "company-unlisted-model".into();
+        login.catalog[0].models = vec!["company-unlisted-model".into()];
         login.catalog[0].model_capabilities = Some(std::collections::BTreeMap::from([(
-            "gpt-5.5".into(),
+            "company-unlisted-model".into(),
             company_caps(272000),
         )]));
         let (_, company) = company_catalog_provider(&login.catalog[0], &login, 1).unwrap();
@@ -1056,7 +1168,7 @@ mod tests {
         let before: Value = serde_json::from_slice(&std::fs::read(&catalog_path).unwrap()).unwrap();
         assert_eq!(before["models"][0]["context_window"], 272000);
         login.catalog[0].model_capabilities = Some(std::collections::BTreeMap::from([(
-            "gpt-5.5".into(),
+            "company-unlisted-model".into(),
             company_caps(400000),
         )]));
         login.api_key = "rotated-company-key".into();
@@ -1100,6 +1212,47 @@ mod tests {
         )
         .unwrap();
         assert_eq!(auth["tokens"]["access_token"], "fixture-personal-oauth");
+    }
+
+    #[test]
+    fn company_refresh_keeps_explicit_fields_but_replaces_snapshot() {
+        let old = json!({"models":[{"model":"m","contextWindow":300000,
+            "inputModalities":["text"],"capabilities":{"context_window":128000}},
+            {"model":"removed","contextWindow":100000}]});
+        let mut new = json!({"modelCatalog":{"models":[{"model":"m",
+            "capabilities":{"context_window":500000}}, {"model":"added"}]}});
+        preserve_company_catalog_overrides(Some(&old), &mut new);
+        let rows = new["modelCatalog"]["models"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["contextWindow"], 300000);
+        assert_eq!(rows[0]["inputModalities"], json!(["text"]));
+        assert_eq!(rows[0]["capabilities"]["context_window"], 500000);
+        assert!(rows[1].get("contextWindow").is_none());
+    }
+
+    #[test]
+    fn company_refresh_preserves_snake_case_overrides_with_camel_case_precedence() {
+        let old = json!({"models":[{
+            "model":"m", "context_window":300000, "display_name":"Custom",
+            "supports_parallel_tool_calls":false, "input_modalities":["text"],
+            "base_instructions":"Explicit prompt", "reasoning_levels":["high"],
+            "default_reasoning_level":"high"
+        }, {"model":"both", "contextWindow":400000, "context_window":300000}]});
+        let mut new = json!({"modelCatalog":{"models":[
+            {"model":"m", "capabilities":{"context_window":500000}}, {"model":"both"}
+        ]}});
+        preserve_company_catalog_overrides(Some(&old), &mut new);
+        let rows = new["modelCatalog"]["models"].as_array().unwrap();
+        assert_eq!(rows[0]["contextWindow"], 300000);
+        assert_eq!(rows[0]["displayName"], "Custom");
+        assert_eq!(rows[0]["supportsParallelToolCalls"], false);
+        assert_eq!(rows[0]["inputModalities"], json!(["text"]));
+        assert_eq!(rows[0]["baseInstructions"], "Explicit prompt");
+        assert_eq!(rows[0]["reasoningLevels"], json!(["high"]));
+        assert_eq!(rows[0]["defaultReasoningLevel"], "high");
+        assert_eq!(rows[0]["capabilities"]["context_window"], 500000);
+        assert!(rows[0].get("context_window").is_none());
+        assert_eq!(rows[1]["contextWindow"], 400000);
     }
 
     #[test]
@@ -1227,6 +1380,135 @@ base_url = "https://leharrt.com"
     }
 
     #[test]
+    fn company_v2_verified_catalog_filters_unknown_models_and_keeps_identity() {
+        let login = sample_login();
+        let mut entry = sample_entry();
+        entry.models = VERIFIED_COMPACTION_MODELS
+            .iter()
+            .map(|m| (*m).into())
+            .collect();
+        entry
+            .models
+            .extend(["gpt-future".into(), "deepseek-v4-pro".into()]);
+        let derived = company_compaction_entry(&entry, &login.base_url).unwrap();
+        assert_eq!(derived.models.len(), 9);
+        assert_eq!(derived.default_model, VERIFIED_COMPACTION_MODEL);
+        assert_eq!(derived.label, format!("{} · 远程压缩 V2", entry.label));
+        let (_, expanded) = company_catalog_provider(&derived, &login, 1).unwrap();
+        entry.models = vec![VERIFIED_COMPACTION_MODEL.into()];
+        let old = company_compaction_entry(&entry, &login.base_url).unwrap();
+        let (_, old) = company_catalog_provider(&old, &login, 1).unwrap();
+        assert_eq!(expanded.id, old.id);
+        assert_eq!(expanded.name, old.name);
+        for model in VERIFIED_COMPACTION_MODELS {
+            entry.models = vec![(*model).into()];
+            entry.default_model = (*model).into();
+            let derived = company_compaction_entry(&entry, &login.base_url).unwrap();
+            assert_eq!(derived.default_model, *model);
+            assert!(company_codex_settings(&derived, &login)["config"]
+                .as_str()
+                .unwrap()
+                .contains("remote_compaction = \"v2\""));
+        }
+        entry.models = vec!["gpt-6-luna".into(), "gpt-6-sol".into()];
+        entry.default_model = "gpt-6-sol".into();
+        entry.model_capabilities = Some(std::collections::BTreeMap::from([
+            ("gpt-6-luna".into(), json!({"context_window": 1000})),
+            ("gpt-future".into(), json!({"context_window": 2000})),
+        ]));
+        let derived = company_compaction_entry(&entry, &login.base_url).unwrap();
+        assert_eq!(derived.default_model, "gpt-6-sol");
+        assert_eq!(derived.model_capabilities.as_ref().unwrap().len(), 1);
+        entry.default_model = "gpt-future".into();
+        assert_eq!(
+            company_compaction_entry(&entry, &login.base_url)
+                .unwrap()
+                .default_model,
+            "gpt-6-luna"
+        );
+        entry.models = vec!["gpt-future".into()];
+        assert!(company_compaction_entry(&entry, &login.base_url).is_none());
+        entry.models = vec![VERIFIED_COMPACTION_MODEL.into()];
+        assert!(company_compaction_entry(&entry, "https://other.example/v1").is_none());
+        entry.protocol = "openai-chat".into();
+        assert!(company_compaction_entry(&entry, &login.base_url).is_none());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn company_v2_all_verified_models_normalize_and_unknown_models_revoke() {
+        let _home = IsolatedHome::new();
+        let state = test_state();
+        let login = sample_login();
+        let mut entry = sample_entry();
+        entry.models = VERIFIED_COMPACTION_MODELS
+            .iter()
+            .map(|m| (*m).into())
+            .collect();
+        for model in VERIFIED_COMPACTION_MODELS {
+            entry.default_model = (*model).into();
+            let (_, provider) = company_catalog_provider(&entry, &login, 1).unwrap();
+            assert!(provider.settings_config["config"]
+                .as_str()
+                .unwrap()
+                .contains("remote_compaction = \"v2\""));
+            state.db.save_provider("codex", &provider).unwrap();
+            normalize_company_codex_providers(&state).unwrap();
+            let refreshed = state
+                .db
+                .get_provider_by_id(&provider.id, "codex")
+                .unwrap()
+                .unwrap();
+            assert!(refreshed.settings_config["config"]
+                .as_str()
+                .unwrap()
+                .contains("remote_compaction = \"v2\""));
+            assert_eq!(normalize_company_codex_providers(&state).unwrap(), 0);
+        }
+        for invalid in ["unknown_row", "unknown_selected", "empty", "malformed_row"] {
+            entry.default_model = VERIFIED_COMPACTION_MODEL.into();
+            let (_, mut provider) = company_catalog_provider(&entry, &login, 1).unwrap();
+            match invalid {
+                "unknown_row" => provider.settings_config["modelCatalog"]["models"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"model": "gpt-future"})),
+                "unknown_selected" => {
+                    let text = provider.settings_config["config"]
+                        .as_str()
+                        .unwrap()
+                        .replace("model = \"gpt-5.6-sol\"", "model = \"gpt-future\"");
+                    provider.settings_config["config"] = json!(text);
+                }
+                "empty" => provider.settings_config["modelCatalog"]["models"] = json!([]),
+                _ => provider.settings_config["modelCatalog"]["models"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"displayName": "unknown"})),
+            }
+            state.db.save_provider("codex", &provider).unwrap();
+            normalize_company_codex_providers(&state).unwrap();
+            let refreshed = state
+                .db
+                .get_provider_by_id(&provider.id, "codex")
+                .unwrap()
+                .unwrap();
+            assert!(
+                refreshed.settings_config["config"]
+                    .as_str()
+                    .unwrap()
+                    .contains("remote_compaction = \"unsupported\""),
+                "{invalid}"
+            );
+        }
+        entry.models.push("gpt-future".into());
+        assert!(!company_codex_settings(&entry, &login)["config"]
+            .as_str()
+            .unwrap()
+            .contains("remote_compaction"));
+    }
+
+    #[test]
     fn company_v2_generation_is_limited_to_verified_route_and_model() {
         let mut entry = sample_entry();
         entry.default_model = VERIFIED_COMPACTION_MODEL.into();
@@ -1285,7 +1567,7 @@ base_url = "https://leharrt.com"
         let mut login = sample_login();
         login.catalog[0]
             .models
-            .push(VERIFIED_COMPACTION_MODEL.into());
+            .extend(VERIFIED_COMPACTION_MODELS.iter().map(|m| (*m).to_string()));
         login.catalog[0].models.push("deepseek-v4-pro".into());
         let (_, mixed) = company_catalog_provider(&login.catalog[0], &login, 1).unwrap();
         state.db.save_provider("codex", &mixed).unwrap();
@@ -1308,7 +1590,30 @@ base_url = "https://leharrt.com"
             .unwrap()
             .contains("remote_compaction"));
         ProviderService::switch(&state, AppType::Codex, &derived.id).unwrap();
+        login.api_key = format!("fixture-token-{number}", number = 9);
         sync_company_providers(&state, &login).unwrap();
+        assert_eq!(
+            ProviderService::current(&state, AppType::Codex).unwrap(),
+            derived.id
+        );
+        let refreshed = state
+            .db
+            .get_provider_by_id(&derived.id, "codex")
+            .unwrap()
+            .unwrap();
+        assert_eq!(refreshed.name, derived.name);
+        assert_eq!(
+            refreshed.settings_config["auth"]["OPENAI_API_KEY"],
+            format!("fixture-token-{number}", number = 9)
+        );
+        assert_eq!(
+            refreshed.settings_config["modelCatalog"]["models"]
+                .as_array()
+                .unwrap()
+                .len(),
+            9
+        );
+        assert_eq!(normalize_company_codex_providers(&state).unwrap(), 0);
         let live = std::fs::read_to_string(crate::codex_config::get_codex_config_path()).unwrap();
         let doc = live.parse::<DocumentMut>().unwrap();
         let id = doc["model_provider"].as_str().unwrap();
@@ -1369,6 +1674,8 @@ base_url = "https://leharrt.com"
             .unwrap()
             .parse::<DocumentMut>()
             .unwrap();
+        doc["model_context_window"] = toml_edit::value(300000);
+        doc["model_auto_compact_token_limit"] = toml_edit::value(270000);
         doc["features"]["remote_compaction_v2"] = toml_edit::value(false);
         doc["features"]["shell_snapshot"] = toml_edit::value(false);
         doc["model_providers"]["custom"]["capabilities"]["image_generation"] =
@@ -1386,6 +1693,11 @@ base_url = "https://leharrt.com"
             .unwrap()
             .parse::<DocumentMut>()
             .unwrap();
+        assert_eq!(doc["model_context_window"].as_integer(), Some(300000));
+        assert_eq!(
+            doc["model_auto_compact_token_limit"].as_integer(),
+            Some(270000)
+        );
         assert!(doc["features"].get("remote_compaction_v2").is_none());
         assert_eq!(doc["features"]["shell_snapshot"].as_bool(), Some(false));
         assert_eq!(

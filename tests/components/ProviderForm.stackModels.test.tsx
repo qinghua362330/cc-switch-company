@@ -5,7 +5,11 @@ import {
   ProviderForm,
   type ProviderFormValues,
 } from "@/components/providers/forms/ProviderForm";
-import type { ProviderCategory, ProviderMeta } from "@/types";
+import type {
+  CodexCatalogModel,
+  ProviderCategory,
+  ProviderMeta,
+} from "@/types";
 import type { AppMode } from "@/types/proxy";
 import { createTestQueryClient } from "../utils/testQueryClient";
 
@@ -65,7 +69,7 @@ function renderForm(
   options: {
     meta?: ProviderMeta;
     category?: ProviderCategory;
-    codexCatalog?: Array<{ model: string; displayName?: string }>;
+    codexCatalog?: CodexCatalogModel[];
     modeView?: AppMode;
     onStackLayoutChange?: (stackLayout: boolean) => void;
   } = {},
@@ -128,7 +132,9 @@ describe("ProviderForm Stack layout (Claude Code)", () => {
     expect(screen.getByDisplayValue("m-s")).toBeInTheDocument();
     expect(screen.getByDisplayValue("Model S")).toBeInTheDocument();
     // 没有 ★：第一行是默认模型，写在「模型列表」后面的「?」里。
-    expect(screen.getByRole("button", { name: "模型列表" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "模型列表" }),
+    ).toBeInTheDocument();
     expect(screen.queryByText("providerForm.modelMappingLabel")).toBeNull();
     expect(screen.queryByText("默认兜底模型")).toBeNull();
   });
@@ -136,10 +142,14 @@ describe("ProviderForm Stack layout (Claude Code)", () => {
   it("简化面板的说明收进「?」，高级选项折叠时不挂说明", () => {
     renderForm("claude", vi.fn());
 
-    expect(screen.getByRole("button", { name: "上游格式" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "上游格式" }),
+    ).toBeInTheDocument();
     expect(screen.queryByText(/一般无需修改/)).toBeNull();
     fireEvent.click(
-      screen.getByRole("button", { name: "providerForm.advancedOptionsToggle" }),
+      screen.getByRole("button", {
+        name: "providerForm.advancedOptionsToggle",
+      }),
     );
     expect(
       screen.getByText("以下两项只在路由、聚合模式下生效。"),
@@ -286,6 +296,54 @@ describe("ProviderForm Stack layout (Codex)", () => {
     expect(screen.queryByTestId("codex-config-editor")).toBeNull();
   });
 
+  it.each([true, false])(
+    "preserves full company capabilities through row edits and save (stack=%s)",
+    async (stack) => {
+      settingsState.enableStackMode = stack;
+      const onSubmit = vi.fn();
+      const capabilities = {
+        context_window: 200000,
+        supports_parallel_tool_calls: false,
+        catalog_snapshot: {
+          schema_version: 1,
+          codex_version: "0.134.0",
+          model: {
+            slug: "m-1",
+            base_instructions: "Native instructions must survive persistence",
+            tools: [{ name: "shell", options: { enabled: false } }],
+            input_modalities: ["text", "image"],
+          },
+        },
+        provenance: { digest: "sha256:1234", version: "v1" },
+      };
+      const row: CodexCatalogModel = {
+        model: "m-1",
+        displayName: "Company model",
+        capabilities,
+        supportsParallelToolCalls: false,
+        inputModalities: ["text", "image"],
+        baseInstructions: "Explicit native override",
+        reasoningLevels: ["high"],
+        defaultReasoningLevel: "high",
+      };
+      renderForm("codex", onSubmit, { codexCatalog: [row] });
+      fireEvent.change(screen.getByDisplayValue("Company model"), {
+        target: { value: "Edited company model" },
+      });
+      fireEvent.change(screen.getByDisplayValue("m-1"), {
+        target: { value: "m-edited" },
+      });
+      const { settings } = await save(onSubmit);
+      expect(settings.modelCatalog.models).toEqual([
+        { ...row, model: "m-edited", displayName: "Edited company model" },
+      ]);
+      expect(settings.modelCatalog.models[0]).not.toHaveProperty(
+        "contextWindow",
+      );
+      expect(settings.modelCatalog.models[0]).not.toHaveProperty("rowId");
+    },
+  );
+
   it("列表第一行是默认模型，保存时写进 model", async () => {
     const onSubmit = vi.fn();
     renderForm("codex", onSubmit, {
@@ -295,7 +353,9 @@ describe("ProviderForm Stack layout (Codex)", () => {
       ],
     });
 
-    expect(screen.getByRole("button", { name: "模型列表" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "模型列表" }),
+    ).toBeInTheDocument();
     // 有列表时第一行就是默认模型，不再单独显示默认模型框。
     expect(document.getElementById("codexDefaultModel")).toBeNull();
     fireEvent.change(screen.getByDisplayValue("m-1"), {

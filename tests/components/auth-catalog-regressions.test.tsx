@@ -46,6 +46,37 @@ const metadata = {
   catalog: [entry],
 };
 
+function builderCapabilities() {
+  return {
+    input_modalities: ["text"],
+    max_input_tokens: 200000,
+    max_output_tokens: 32000,
+    source: {
+      fields: { context_window: "models.dev" },
+      codex_bundled: {
+        kind: "codex-bundled",
+        sha256: "a".repeat(64),
+        codex_version: "0.134.0",
+      },
+      models_dev: {
+        kind: "models.dev",
+        sha256: "b".repeat(64),
+        provider: "openai",
+        model_id: "gpt-5.5",
+      },
+    },
+    catalog_snapshot: {
+      schema_version: 1,
+      codex_version: "0.134.0",
+      model: {
+        slug: "gpt-5.5",
+        base_instructions: "private native instructions",
+      },
+      source: { kind: "codex-bundled", sha256: "a".repeat(64) },
+    },
+  };
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((done) => {
@@ -135,6 +166,135 @@ describe("company catalog transactional refresh", () => {
     });
     expect(sync).toHaveBeenCalledTimes(2);
   });
+
+  it.each([
+    "source.fields",
+    "source.codex_bundled",
+    "source.models_dev",
+    "snapshot.source",
+    "input_modalities",
+    "max_input_tokens",
+    "max_output_tokens",
+  ])(
+    "syncs real builder wire metadata when only %s changes",
+    async (change) => {
+      const caps = builderCapabilities();
+      const next = builderCapabilities();
+      switch (change) {
+        case "source.fields":
+          next.source.fields.context_window = "codex-bundled";
+          break;
+        case "source.codex_bundled":
+          next.source.codex_bundled.sha256 = "c".repeat(64);
+          break;
+        case "source.models_dev":
+          next.source.models_dev.sha256 = "c".repeat(64);
+          break;
+        case "snapshot.source":
+          next.catalog_snapshot.source.sha256 = "c".repeat(64);
+          break;
+        case "input_modalities":
+          next.input_modalities.push("image");
+          break;
+        case "max_input_tokens":
+          next.max_input_tokens = 300000;
+          break;
+        case "max_output_tokens":
+          next.max_output_tokens = 64000;
+          break;
+      }
+      setCompanyAuthState({
+        ...metadata,
+        catalog: [{ ...entry, model_capabilities: { "gpt-5.5": caps } }],
+      });
+      server.use(
+        http.post(`${endpoint}/company_auth_refresh_catalog`, () =>
+          HttpResponse.json({
+            base_url: metadata.base_url,
+            catalog: [{ ...entry, model_capabilities: { "gpt-5.5": next } }],
+          }),
+        ),
+      );
+      await renderGate();
+      await waitFor(() => expect(sync).toHaveBeenCalledOnce());
+      await act(async () => {
+        await poll.daily();
+      });
+      expect(sync).toHaveBeenCalledTimes(2);
+      await act(async () => {
+        await poll.daily();
+      });
+      expect(sync).toHaveBeenCalledTimes(2);
+      expect(document.body.innerHTML).not.toContain(
+        "private native instructions",
+      );
+    },
+  );
+
+  it.each(["native row", "version", "digest", "source"])(
+    "syncs a snapshot-only %s change without exposing native instructions",
+    async (change) => {
+      const snapshot = {
+        schema_version: 1,
+        codex_version: "0.134.0",
+        digest: "sha256:abc123",
+        model: {
+          slug: "gpt-5.5",
+          base_instructions: "private native instructions",
+        },
+      };
+      const caps = {
+        context_window: 400000,
+        catalog_snapshot: snapshot,
+        source: { version: "v1", fingerprint: "sha256:111" },
+      };
+      setCompanyAuthState({
+        ...metadata,
+        catalog: [{ ...entry, model_capabilities: { "gpt-5.5": caps } }],
+      });
+      const next = {
+        ...caps,
+        catalog_snapshot: {
+          ...snapshot,
+          ...(change === "native row"
+            ? {
+                model: {
+                  ...snapshot.model,
+                  base_instructions: "changed private native instructions",
+                },
+              }
+            : {}),
+          ...(change === "version" ? { codex_version: "0.135.0" } : {}),
+          ...(change === "digest" ? { digest: "sha256:def456" } : {}),
+        },
+        ...(change === "source"
+          ? { source: { version: "v2", fingerprint: "sha256:222" } }
+          : {}),
+      };
+      server.use(
+        http.post(`${endpoint}/company_auth_refresh_catalog`, () =>
+          HttpResponse.json({
+            base_url: metadata.base_url,
+            catalog: [{ ...entry, model_capabilities: { "gpt-5.5": next } }],
+          }),
+        ),
+      );
+      await renderGate();
+      await waitFor(() => expect(sync).toHaveBeenCalledOnce());
+      await act(async () => {
+        await poll.daily();
+      });
+      expect(sync).toHaveBeenCalledTimes(2);
+      // An unchanged snapshot must not repeatedly sync after publication.
+      await act(async () => {
+        await poll.daily();
+      });
+      expect(sync).toHaveBeenCalledTimes(2);
+      expect(document.body.innerHTML).not.toContain(
+        "private native instructions",
+      );
+    },
+  );
 
   it("syncs a base URL change without changing the models", async () => {
     server.use(
@@ -443,5 +603,183 @@ describe("company capability DTO", () => {
       },
     );
     expect(JSON.stringify(snake)).not.toContain("opaque-secret");
+  });
+
+  it("allowlists real builder provenance without exposing arbitrary nested fields", () => {
+    const caps = builderCapabilities();
+    const normalize = (capabilities: Record<string, unknown>) => {
+      const state = normalizeCompanyAuthState({
+        ...metadata,
+        catalog: [
+          { ...entry, model_capabilities: { "gpt-5.5": capabilities } },
+        ],
+      });
+      return state.authenticated
+        ? state.catalog[0].modelCapabilities?.["gpt-5.5"]
+        : undefined;
+    };
+    const normalized = normalize({
+      ...caps,
+      source: {
+        ...caps.source,
+        fields: {
+          ...caps.source.fields,
+          instructions: "private",
+          max_output_tokens: "Bearer credential",
+        },
+        codex_bundled: {
+          ...caps.source.codex_bundled,
+          instructions: "private",
+        },
+        models_dev: { ...caps.source.models_dev, api_key: "private" },
+        unknown: { prompt: "private" },
+      },
+      catalog_snapshot: {
+        ...caps.catalog_snapshot,
+        source: { ...caps.catalog_snapshot.source, prompt: "private" },
+      },
+    });
+    expect(normalized?.source).toEqual(caps.source);
+    expect(normalized?.catalog_snapshot?.source).toEqual(
+      caps.catalog_snapshot.source,
+    );
+    expect(normalized).toMatchObject({
+      input_modalities: ["text"],
+      max_input_tokens: 200000,
+      max_output_tokens: 32000,
+    });
+    expect(JSON.stringify(normalized)).not.toContain("private");
+    expect(JSON.stringify(normalized)).not.toContain("instructions");
+    const { input_modalities, max_input_tokens, max_output_tokens, ...rest } =
+      caps;
+    expect(
+      JSON.stringify(
+        normalize({
+          ...rest,
+          inputModalities: input_modalities,
+          maxInputTokens: max_input_tokens,
+          maxOutputTokens: max_output_tokens,
+          source: {
+            models_dev: {
+              model_id: "gpt-5.5",
+              provider: "openai",
+              sha256: "b".repeat(64),
+              kind: "models.dev",
+            },
+            codex_bundled: {
+              codex_version: "0.134.0",
+              sha256: "a".repeat(64),
+              kind: "codex-bundled",
+            },
+            fields: { context_window: "models.dev" },
+          },
+        }),
+      ),
+    ).toBe(JSON.stringify(normalized));
+    expect(
+      normalize({
+        input_modalities: ["text", "Bearer credential", { prompt: "private" }],
+        max_input_tokens: -1,
+        max_output_tokens: "32000",
+        source: {
+          codex_bundled: { sha256: "not-a-sha256", prompt: "private" },
+          models_dev: [],
+        },
+      }),
+    ).toEqual({ input_modalities: ["text"] });
+  });
+
+  it("retains only safe snapshot/source descriptors with stable alias and key ordering", () => {
+    const normalize = (caps: Record<string, unknown>) =>
+      normalizeCompanyAuthState({
+        ...metadata,
+        catalog: [{ ...entry, model_capabilities: { "gpt-5.5": caps } }],
+      });
+    const snake = normalize({
+      catalog_snapshot: {
+        schema_version: 1,
+        codex_version: "0.134.0",
+        digest: "sha256:123abc",
+        model: {
+          slug: "gpt-5.5",
+          base_instructions: "private native instructions",
+          tools: [{ name: "shell", options: { enabled: true, limit: 42 } }],
+        },
+      },
+      source: {
+        codex_version: "0.134.0",
+        fingerprint: "sha256:abcdef",
+        api_key: ["private", "credential"].join(" "),
+        instructions: "do not expose",
+      },
+      provenance: { version: "v1", digest: "sha256:987654" },
+    });
+    const camel = normalize({
+      provenance: { digest: "sha256:987654", version: "v1" },
+      source: { fingerprint: "sha256:abcdef", codexVersion: "0.134.0" },
+      catalogSnapshot: {
+        model: {
+          tools: [{ options: { limit: 42, enabled: true }, name: "shell" }],
+          base_instructions: "private native instructions",
+          slug: "gpt-5.5",
+        },
+        digest: "sha256:123abc",
+        codexVersion: "0.134.0",
+        schemaVersion: 1,
+      },
+    });
+    expect(JSON.stringify(snake)).toBe(JSON.stringify(camel));
+    expect(
+      snake.authenticated &&
+        snake.catalog[0].modelCapabilities?.["gpt-5.5"].catalog_snapshot,
+    ).toEqual({
+      schema_version: 1,
+      codex_version: "0.134.0",
+      model_slug: "gpt-5.5",
+      digest: "sha256:123abc",
+      fingerprint: expect.stringMatching(/^fnv1a64:[0-9a-f]{16}$/),
+    });
+    for (const text of [
+      "private native instructions",
+      "private credential",
+      "do not expose",
+      "base_instructions",
+      '"tools"',
+    ]) {
+      expect(JSON.stringify(snake)).not.toContain(text);
+    }
+  });
+
+  it.each([
+    null,
+    [],
+    { schema_version: 2 },
+    {
+      schema_version: 1,
+      codex_version: "instructions with spaces",
+      model: { slug: "gpt-5.5" },
+    },
+  ])("ignores malformed snapshot descriptors: %j", (catalog_snapshot) => {
+    const state = normalizeCompanyAuthState({
+      ...metadata,
+      catalog: [
+        {
+          ...entry,
+          model_capabilities: {
+            "gpt-5.5": {
+              catalog_snapshot,
+              source: {
+                version: "sk-secret",
+                fingerprint: "Bearer credential",
+                prompt: "instructions",
+              },
+            },
+          },
+        },
+      ],
+    });
+    expect(state.authenticated && state.catalog[0].modelCapabilities).toEqual({
+      "gpt-5.5": {},
+    });
   });
 });

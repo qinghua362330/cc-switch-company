@@ -3397,12 +3397,14 @@ model_provider = "aihubmix"
             None,
         );
         official.category = Some("official".to_string());
+        // An unmatched company model exercises the server-capability fallback;
+        // matching the test-only bundled GPT row would correctly prefer local metadata.
         let company = Provider::with_id(
             "company-fixture".to_string(),
             "Company fixture".to_string(),
             serde_json::json!({ "auth": { "OPENAI_API_KEY": "fixture-company-token" },
-                "config": "model_provider = \"custom\"\nmodel = \"gpt-5.5\"\n[model_providers.custom]\nname = \"Company\"\nbase_url = \"https://fixture.invalid/v1\"\nwire_api = \"responses\"\n",
-                "modelCatalog": { "models": [{ "model": "gpt-5.5", "capabilities": {
+                "config": "model_provider = \"custom\"\nmodel = \"company-fixture-model\"\n[model_providers.custom]\nname = \"Company\"\nbase_url = \"https://fixture.invalid/v1\"\nwire_api = \"responses\"\n",
+                "modelCatalog": { "models": [{ "model": "company-fixture-model", "capabilities": {
                     "supported_reasoning_levels": [
                         {"effort": "max", "description": "Pool max"},
                         {"effort": "ultra", "description": "Pool ultra"}

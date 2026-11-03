@@ -568,20 +568,6 @@ function AppContent({ authShell }: { authShell: ReactNode }) {
     };
   }, [queryClient]);
 
-  useTauriEvent<{ active: boolean }>(
-    "codex-quota-fallback-changed",
-    ({ active }) => {
-      toast.info(
-        t(
-          active
-            ? "settings.codexQuotaFallbackActive"
-            : "settings.codexQuotaFallbackInactive",
-        ),
-        { duration: 8000 },
-      );
-    },
-  );
-
   useTauriEvent<{ status: "waiting" | "reloaded" | "manual" }>(
     "codex-login-mode-refresh",
     ({ status }) => {

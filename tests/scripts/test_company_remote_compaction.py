@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import re
 import tempfile
 import tomllib
 import unittest
@@ -70,6 +71,37 @@ def tool_records():
             record["input"][key] = tool_summary[key]
     trace.insert(1, after_tool)
     return trace
+
+
+class CompanyCompactionSourceContractTests(unittest.TestCase):
+    """Offline source wiring checks; Rust behavioral tests live in company_auth.rs."""
+
+    def test_verified_allowlist_is_exact_not_a_prefix_rule(self):
+        source = (ROOT / "src-tauri/src/commands/company_auth.rs").read_text()
+        declaration = re.search(
+            r"const VERIFIED_COMPACTION_MODELS: &\[&str\] = &\[(.*?)\];",
+            source, re.S,
+        )
+        self.assertIsNotNone(declaration)
+        models = re.findall(r'"([^"]+)"', declaration.group(1))
+        self.assertEqual(len(models), 9)
+        self.assertEqual(set(models), {
+            "gpt-6.1-terra", "gpt-5.6-luna", "codex-auto-review", "gpt-5.6-sol",
+            "gpt-6-sol", "gpt-6.1-sol", "gpt-6-astra", "gpt-6-luna", "gpt-5.6-terra",
+        })
+
+    def test_generator_and_normalizer_share_fail_closed_catalog_check(self):
+        source = (ROOT / "src-tauri/src/commands/company_auth.rs").read_text()
+        generator = source.split("fn company_codex_settings(", 1)[1].split(
+            "fn company_gemini_settings(", 1)[0]
+        normalizer = source.split("pub fn normalize_company_codex_providers(", 1)[1].split(
+            "fn normalize_company_codex_config_text(", 1)[0]
+        for body in (generator, normalizer):
+            self.assertIn("verified_compaction_catalog(", body)
+            self.assertIn("verified_compaction_base", body)
+            self.assertIn("openai", body)
+        self.assertIn("foreign_catalog", normalizer)
+        self.assertIn('toml_edit::value("unsupported")', normalizer)
 
 
 class RemoteCompactionHarnessTests(unittest.TestCase):

@@ -554,7 +554,6 @@ fn row_auth(provider: &Provider) -> Value {
 
 /// 在内存里算好的一次 Codex 写入。
 pub(crate) struct Planned {
-    quota_identity: Option<String>,
     company_compaction_cleanup: CompanyCompactionCleanup,
     config: CodexConfigPatch,
     /// 第三方路由表的凭据来源：写入时按盘上有没有登录定 `requires_openai_auth`。
@@ -880,24 +879,6 @@ pub(crate) fn plan(
         company_compaction_cleanup: CompanyCompactionCleanup(
             provider.is_some_and(is_company_provider),
         ),
-        quota_identity: match target {
-            Target::Direct(provider) => provider.map(|p| p.id.clone()),
-            Target::Proxy {
-                route,
-                base_url,
-                stack,
-            } => {
-                let catalog_value = catalog
-                    .as_deref()
-                    .and_then(|bytes| serde_json::from_slice(bytes).ok());
-                crate::services::codex_quota_fallback::proxy_identity(
-                    route,
-                    base_url,
-                    stack,
-                    catalog_value.as_ref(),
-                )
-            }
-        },
         config,
         stamp,
         catalog,
@@ -1411,16 +1392,12 @@ pub(crate) fn run_with_edits(
         .transpose()?;
     let catalog_patch = planned.catalog.map(WholeFile::Write);
     // 先应用编辑器里的全局改动（有的话），再换关键字段。
-    let quota_cleanup = crate::services::codex_quota_fallback::projection(None, true);
-    let quota_overlay =
-        crate::services::codex_quota_fallback::projection(planned.quota_identity, false);
-    let mut config_steps: Vec<&dyn TomlDocPatch> = vec![&quota_cleanup];
+    let mut config_steps: Vec<&dyn TomlDocPatch> = Vec::new();
     if let Some(edits) = edits {
         config_steps.push(edits);
     }
     config_steps.push(&planned.company_compaction_cleanup);
     config_steps.push(&config);
-    config_steps.push(&quota_overlay);
     let config_patch = TomlSteps(config_steps);
 
     let mut changes: Vec<FileChange<'_>> = Vec::new();
@@ -1455,9 +1432,6 @@ pub(crate) fn run_with_edits(
     }
 
     let report = write.run(op, &changes, pending);
-    if report.is_ok() {
-        crate::services::codex_quota_fallback::projection_committed();
-    }
     // 按磁盘上的实际内容记新启动的 Codex 会读到的目录：失败时可能已经发布了一部分。
     super::codex_client_catalog::observe(store);
     report
