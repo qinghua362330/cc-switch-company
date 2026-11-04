@@ -974,21 +974,6 @@ pub(crate) fn write_codex_live_config_atomic(config_text: Option<&str>) -> Resul
     write_text_file_private(&get_codex_config_path(), text)
 }
 
-/// Quota eligibility uses the same credential projection as the route writer.
-pub fn prepare_codex_provider_live_config(
-    auth: &Value,
-    config_text: &str,
-) -> Result<String, AppError> {
-    use crate::live::project::codex::{CodexProjection, RowInput};
-    let settings = json!({"auth": auth, "config": config_text});
-    CodexProjection::of(&RowInput {
-        settings: &settings,
-        official: false,
-        proxy_injected_oauth: false,
-    })
-    .map(|projection| projection.catalog_input_text())
-}
-
 pub fn extract_codex_api_key(auth: Option<&Value>, config_text: Option<&str>) -> Option<String> {
     auth.and_then(extract_codex_auth_api_key)
         .or_else(|| config_text.and_then(extract_codex_experimental_bearer_token))

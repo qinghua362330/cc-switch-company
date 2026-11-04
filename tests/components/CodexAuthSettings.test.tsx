@@ -146,7 +146,7 @@ describe("CodexAuthSettings official quota protection", () => {
     diskUsageMock.mockResolvedValue(0);
   });
 
-  it("does not offer the removed login fallback and leaves protection opt-in", async () => {
+  it("does not offer the removed login fallback and enables protection by default", async () => {
     const onChange = vi.fn().mockResolvedValue(true);
     await act(async () => {
       render(<CodexAuthSettings settings={defaults} onChange={onChange} />);
@@ -159,13 +159,13 @@ describe("CodexAuthSettings official quota protection", () => {
     const protection = screen.getByRole("switch", {
       name: "settings.codexQuotaProtection.title",
     });
-    expect(protection).toHaveAttribute("aria-checked", "false");
+    expect(protection).toHaveAttribute("aria-checked", "true");
     await act(async () => fireEvent.click(protection));
     expect(onChange).toHaveBeenCalledWith({
       codexQuotaProtection: {
-        enabled: true,
+        enabled: false,
         fiveHourThreshold: 95,
-        weeklyThreshold: 98,
+        weeklyThreshold: 95,
       },
     });
   });

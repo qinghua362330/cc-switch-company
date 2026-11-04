@@ -25,13 +25,24 @@ describe("remembered usage choices", () => {
   });
 
   it("keeps working when storage is unavailable", () => {
-    vi.spyOn(localStorage, "getItem").mockImplementation(() => {
-      throw new Error("denied");
+    const original = Object.getOwnPropertyDescriptor(window, "localStorage");
+    Object.defineProperty(window, "localStorage", {
+      configurable: true,
+      value: {
+        getItem: () => {
+          throw new Error("denied");
+        },
+        setItem: () => {
+          throw new Error("denied");
+        },
+      },
     });
-    vi.spyOn(localStorage, "setItem").mockImplementation(() => {
-      throw new Error("denied");
-    });
-    expect(() => writeRememberedChoice(KEY, "cost")).not.toThrow();
-    expect(readRememberedChoice(KEY, METRICS, "tokens")).toBe("tokens");
+    try {
+      expect(() => writeRememberedChoice(KEY, "cost")).not.toThrow();
+      expect(readRememberedChoice(KEY, METRICS, "tokens")).toBe("tokens");
+    } finally {
+      if (original) Object.defineProperty(window, "localStorage", original);
+      else Reflect.deleteProperty(window, "localStorage");
+    }
   });
 });
