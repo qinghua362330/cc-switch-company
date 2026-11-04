@@ -1934,7 +1934,7 @@ fn push_env_codex_cli_candidates(candidates: &mut Vec<PathBuf>, seen: &mut HashS
 /// Parse only executable paths from `ps -axo comm=` (never arguments/environment).
 /// A unique recognized bundle is evidence of a running desktop installation, not
 /// a claim about the foreground client. Multiple bundles are deliberately ambiguous.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 fn running_codex_cli_candidates_from_comm(comm: &str) -> Vec<PathBuf> {
     let mut bundle = None;
     let mut executables = Vec::new();
@@ -6822,6 +6822,7 @@ wire_api = "responses"
             .any(|candidate| candidate == Path::new("codex")));
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn codex_discovery_running_bundle_accepts_exact_main_and_cli_paths() {
         let bundle = Path::new("/Volumes/External Apps/Codex.app");
@@ -6852,6 +6853,7 @@ wire_api = "responses"
         );
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn codex_discovery_running_bundle_rejects_ambiguous_installations() {
         for comm in [
@@ -6862,6 +6864,7 @@ wire_api = "responses"
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn codex_discovery_running_bundle_ignores_unrecognized_paths_and_arguments() {
         for comm in [
