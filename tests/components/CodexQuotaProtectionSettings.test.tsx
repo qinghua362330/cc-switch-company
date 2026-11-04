@@ -19,7 +19,7 @@ vi.mock("@/lib/toast", () => ({ toast: { error: toastError } }));
 
 const key = (name: string) => `settings.codexQuotaProtection.${name}`;
 
-const ENABLED = { enabled: true, fiveHourThreshold: 95, weeklyThreshold: 98 };
+const ENABLED = { enabled: true, fiveHourThreshold: 95, weeklyThreshold: 95 };
 
 function setup(
   initial: Partial<SettingsFormState> = { codexQuotaProtection: ENABLED },
@@ -120,21 +120,23 @@ describe("Codex official quota protection settings", () => {
     expect(toastError).toHaveBeenCalledWith("notifications.saveFailedGeneric");
     expect(screen.getByRole("button", { name: key("save") })).toBeEnabled();
   });
-  it("is off by default and enabling keeps the 95% / 98% defaults", async () => {
+  it("is on by default and preserves the 95% / 95% defaults when disabled", async () => {
     const save = setup({});
     const toggle = screen.getByRole("switch", { name: key("title") });
-    expect(toggle).toHaveAttribute("aria-checked", "false");
-    expect(screen.queryByRole("spinbutton")).not.toBeInTheDocument();
-    await act(async () => {
-      fireEvent.click(toggle);
-    });
-    expect(save).toHaveBeenLastCalledWith({ codexQuotaProtection: ENABLED });
+    expect(toggle).toHaveAttribute("aria-checked", "true");
     expect(
       screen.getByRole("spinbutton", { name: key("fiveHour") }),
     ).toHaveValue(95);
     expect(screen.getByRole("spinbutton", { name: key("weekly") })).toHaveValue(
-      98,
+      95,
     );
+    await act(async () => {
+      fireEvent.click(toggle);
+    });
+    expect(save).toHaveBeenLastCalledWith({
+      codexQuotaProtection: { ...ENABLED, enabled: false },
+    });
+    expect(screen.queryByRole("spinbutton")).not.toBeInTheDocument();
   });
 
   it("saves independently edited thresholds together", async () => {
@@ -146,7 +148,7 @@ describe("Codex official quota protection settings", () => {
     const fiveHour = screen.getByRole("spinbutton", { name: key("fiveHour") });
     const weekly = screen.getByRole("spinbutton", { name: key("weekly") });
     expect(fiveHour).toHaveValue(95);
-    expect(weekly).toHaveValue(98);
+    expect(weekly).toHaveValue(95);
     expect(screen.getByRole("button", { name: key("save") })).toBeDisabled();
     fireEvent.change(fiveHour, { target: { value: "90" } });
     expect(save).not.toHaveBeenCalled();
@@ -156,7 +158,7 @@ describe("Codex official quota protection settings", () => {
         codexQuotaProtection: {
           enabled: true,
           fiveHourThreshold: 90,
-          weeklyThreshold: 98,
+          weeklyThreshold: 95,
         },
       }),
     );
@@ -200,7 +202,7 @@ describe("Codex official quota protection settings", () => {
       codexQuotaProtection: {
         enabled: false,
         fiveHourThreshold: 95,
-        weeklyThreshold: 98,
+        weeklyThreshold: 95,
       },
     });
     expect(screen.queryByRole("spinbutton")).not.toBeInTheDocument();

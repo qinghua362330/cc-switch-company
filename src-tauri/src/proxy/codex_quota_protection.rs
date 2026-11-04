@@ -368,13 +368,13 @@ mod tests {
     }
 
     #[test]
-    fn defaults_are_off_and_saved_thresholds_validate() {
+    fn defaults_are_on_and_saved_thresholds_validate() {
         let defaults: CodexQuotaProtection = serde_json::from_str("{}").unwrap();
         assert_eq!(defaults, CodexQuotaProtection::default());
-        assert!(!defaults.enabled);
+        assert!(defaults.enabled);
         assert_eq!(
             (defaults.five_hour_threshold, defaults.weekly_threshold),
-            (95, 98)
+            (95, 95)
         );
         for value in [0, 100, 255] {
             assert!(CodexQuotaProtection {
@@ -476,9 +476,9 @@ mod tests {
             weekly: window(weekly, None),
             observed_at: NOW,
         };
-        assert!(snapshot(94.99, 97.99).check(&config).is_ok());
+        assert!(snapshot(94.99, 94.99).check(&config).is_ok());
         assert!(snapshot(95.0, 10.0).check(&config).is_err());
-        assert!(snapshot(0.0, 98.0).check(&config).is_err());
+        assert!(snapshot(0.0, 95.0).check(&config).is_err());
         let custom = CodexQuotaProtection {
             five_hour_threshold: 90,
             ..enabled()

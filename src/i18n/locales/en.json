@@ -903,7 +903,7 @@
       "weekly": "Weekly usage (%)",
       "save": "Save thresholds",
       "reset": "Restore defaults",
-      "hint": "Pause at either cutoff. Defaults: 95% / 98%. Saved changes apply to new requests immediately.",
+      "hint": "Pause at either cutoff. Defaults: 95% / 95%. Saved changes apply to new requests immediately.",
       "invalid": "Enter whole numbers from 1 to 99."
     },
     "preserveCodexOfficialAuthOnSwitch": "Keep official login for direct switches",

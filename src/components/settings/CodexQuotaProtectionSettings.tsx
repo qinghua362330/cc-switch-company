@@ -7,9 +7,9 @@ import { toast } from "@/lib/toast";
 import { SettingsRow, SettingsSwitchRow } from "./SettingsLayout";
 
 export const DEFAULT_CODEX_QUOTA_PROTECTION = {
-  enabled: false,
+  enabled: true,
   fiveHourThreshold: 95,
-  weeklyThreshold: 98,
+  weeklyThreshold: 95,
 };
 
 export function CodexQuotaProtectionSettings({

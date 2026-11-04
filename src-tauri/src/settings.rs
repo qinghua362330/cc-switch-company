@@ -397,9 +397,9 @@ pub struct CodexQuotaProtection {
 impl Default for CodexQuotaProtection {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             five_hour_threshold: 95,
-            weekly_threshold: 98,
+            weekly_threshold: 95,
         }
     }
 }
@@ -1772,14 +1772,14 @@ mod tests {
     }
 
     #[test]
-    fn upstream_protection_defaults_off_and_ignores_legacy_fallback() {
+    fn company_protection_defaults_on_and_ignores_legacy_fallback() {
         let settings: AppSettings = serde_json::from_value(serde_json::json!({
             "codexQuotaAutoFallback": true
         }))
         .expect("legacy settings");
-        assert!(!settings.codex_quota_protection.enabled);
+        assert!(settings.codex_quota_protection.enabled);
         assert_eq!(settings.codex_quota_protection.five_hour_threshold, 95);
-        assert_eq!(settings.codex_quota_protection.weekly_threshold, 98);
+        assert_eq!(settings.codex_quota_protection.weekly_threshold, 95);
         assert!(serde_json::to_value(&settings)
             .unwrap()
             .get("codexQuotaAutoFallback")

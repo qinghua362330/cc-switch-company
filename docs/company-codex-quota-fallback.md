@@ -1,43 +1,13 @@
-# Codex quota migration guide
+# Codex official quota and conversation migration (company build)
 
-The Magpie-style `codexQuotaAutoFallback` feature is removed. CC Switch no
-longer changes Codex from official login mode to a company or third-party API
-when the official account is exhausted. It does not rotate accounts, rewrite
-`auth.json`, or automatically bypass upstream capacity and quota limits.
+The Magpie-style `codexQuotaAutoFallback` login-mode switch has been removed.
+The company build enables upstream official POST quota protection by default:
+95% five-hour usage or 95% weekly usage. An explicit `false` wins. All official
+POST requests routed through CC Switch, **including pre-turn compaction**, are
+subject to the guard. Unknown usage fails open; concurrent use, other clients
+and expired credentials can still exhaust the account. It is not account
+failover and never reroutes a previous official model's compaction request.
 
-## Replacement: official POST quota protection
+This policy does not make an existing official-auth conversation portable. On an official-to-company model switch, Codex may first compact with the **previous official model**. That compaction produces opaque OpenAI state which a third-party backend cannot decrypt. CC Switch must not reinterpret it as a usable summary or claim the old context was transferred. For existing conversations, start a new company-model conversation, or ask the official model to write a plaintext handoff (e.g. `NOTES.md`) before switching and have the new model read it.
 
-Official POST protection is opt-in (disabled by default) with these thresholds:
-
-- 95% five-hour usage
-- 98% weekly usage
-
-An explicit `true` remains respected, so existing users who enabled protection stay enabled. The removed legacy fallback setting does not enable protection. When protection is active and a known usage
-window reaches either threshold, CC Switch pauses new official POST requests;
-third-party model requests are unaffected. The setting applies to requests
-passing through CC Switch's local Codex route; it is not an account switch or a
-guarantee that an older official model's compaction request will succeed.
-
-Usage is best effort and fails open. If usage cannot be read because of a
-network error, expired login, missing window, malformed response, or another
-lookup problem, the request is allowed upstream. Usage from official response
-headers is reused when available; a cold or stale reading may require one
-bounded lookup, but an unavailable lookup never blocks the request.
-
-## Upgrade and recovery notes
-
-Remove operational guidance that expects quota exhaustion to toggle
-`requires_openai_auth`, refresh the desktop app-server, or restore a fallback
-marker. The old fallback state is not a supported routing mechanism.
-
-If an older transition marker remains after an upgrade, startup treats it as a
-recovery hint only when it still matches the current Codex home, route, and
-account. Matching state may be restored safely; a stale or mismatched marker is
-discarded without overwriting current user settings. This protects against a
-crash or a later manual route/account change.
-
-Protection is a local admission guard, not proof of account exhaustion or
-successful recovery. A paused official request can resume after usage falls
-below the thresholds or a window resets, subject to a fresh reading. Company
-and third-party routes still require their own valid credentials, capacity, and
-quota.
+A future gateway-managed portable-summary mode requires explicit, verifiable eligibility established from the conversation's first turn, plus request/response pairing and safe retry behavior. The request preflight helper alone is not an active migration feature: no official route enables it today. Unknown or foreign encrypted compaction entries remain ineligible.

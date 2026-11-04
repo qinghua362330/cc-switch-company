@@ -184,12 +184,10 @@ pub(crate) fn compaction_incomplete_reason(finish_reason: Option<&str>) -> Optio
     }
 }
 
-/// 原生 Responses 格式的第三方上游：压缩触发是 Codex 私有协议，普通 Responses 网关收到
-/// 只会回一条普通消息（Codex 照样 Fatal），这里改成和 Chat / Anthropic 转换一样的摘要回合；
-/// CC Switch 包装的压缩摘要谁都解不开，转成用户消息。
-///
-/// 别的压缩条目看不出来源，可能正是这家自己签发、能正常解开的，原样发出；上游明确拒绝后
-/// 由 `opaque_state_rectifier` 换成文字重试。请求里没有前两类条目时一个字节都不动。
+/// Native third-party Responses behavior.  Keep its historical permissive
+/// opaque-item handling: an upstream may own and understand those payloads,
+/// so they pass through and can be rectified only if that upstream rejects
+/// them.
 pub(crate) fn prepare_native_third_party_request(body: &mut Value) -> bool {
     let Some(items) = body.get("input").and_then(Value::as_array) else {
         return false;
