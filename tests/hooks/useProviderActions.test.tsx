@@ -61,6 +61,7 @@ const piApiUpdateProviderUsageScriptMock = vi.fn();
 const settingsApiGetMock = vi.fn();
 const settingsApiApplyMock = vi.fn();
 const openclawApiGetModelCatalogMock = vi.fn();
+const openclawApiSetModelCatalogMock = vi.fn();
 const openclawApiGetDefaultModelMock = vi.fn();
 const openclawApiSetDefaultModelMock = vi.fn();
 
@@ -84,6 +85,8 @@ vi.mock("@/lib/api", () => ({
   openclawApi: {
     getModelCatalog: (...args: unknown[]) =>
       openclawApiGetModelCatalogMock(...args),
+    setModelCatalog: (...args: unknown[]) =>
+      openclawApiSetModelCatalogMock(...args),
     getDefaultModel: (...args: unknown[]) =>
       openclawApiGetDefaultModelMock(...args),
     setDefaultModel: (...args: unknown[]) =>
@@ -128,6 +131,7 @@ beforeEach(() => {
   settingsApiGetMock.mockReset();
   settingsApiApplyMock.mockReset();
   openclawApiGetModelCatalogMock.mockReset();
+  openclawApiSetModelCatalogMock.mockReset();
   openclawApiGetDefaultModelMock.mockReset();
   openclawApiSetDefaultModelMock.mockReset();
   providersApiOpenTerminalMock.mockResolvedValue(true);
@@ -1040,6 +1044,36 @@ describe("useProviderActions", () => {
     });
 
     expect(result.current.isLoading).toBe(true);
+  });
+
+  it("keeps existing OpenClaw catalog entries when registering a new provider's models", async () => {
+    openclawApiGetModelCatalogMock.mockResolvedValueOnce({
+      "my-or/kept": { alias: "Mine" },
+      "my-or/preset": { alias: "Old" },
+    });
+    const { wrapper } = createWrapper();
+    const { result } = renderHook(() => useProviderActions("openclaw"), {
+      wrapper,
+    });
+
+    await act(async () => {
+      await result.current.addProvider({
+        ...createProvider(),
+        suggestedDefaults: {
+          modelCatalog: {
+            "my-or/kept": {},
+            "my-or/preset": { alias: "Opus" },
+            "my-or/new": {},
+          },
+        },
+      });
+    });
+
+    expect(openclawApiSetModelCatalogMock).toHaveBeenCalledWith({
+      "my-or/kept": { alias: "Mine" },
+      "my-or/preset": { alias: "Opus" },
+      "my-or/new": {},
+    });
   });
 
   it("sets the first OpenClaw model without inventing a fallback chain", async () => {

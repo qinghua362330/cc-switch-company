@@ -8,10 +8,12 @@ use cc_switch_lib::auth_client::{
 };
 use futures::future::BoxFuture;
 
+type CatalogResult = Result<(String, Vec<CatalogEntry>), AuthError>;
+
 #[derive(Clone, Default)]
 struct MockProvisionClient {
     login_result: Arc<Mutex<Option<Result<LoginResponse, AuthError>>>>,
-    catalog_result: Arc<Mutex<Option<Result<(String, Vec<CatalogEntry>), AuthError>>>>,
+    catalog_result: Arc<Mutex<Option<CatalogResult>>>,
     catalog_version_result: Arc<Mutex<Option<Result<String, AuthError>>>>,
     seen_authorization: Arc<Mutex<Option<String>>>,
 }

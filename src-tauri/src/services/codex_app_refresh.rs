@@ -1,9 +1,9 @@
 //! Reload the desktop's cached login mode after a verified quota transition.
 use super::codex_app_process::{self, AppServer};
 use crate::{codex_config, store::AppState};
-use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::sync::LazyLock;
 use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -12,8 +12,8 @@ use std::{
 use tauri::Emitter;
 use tokio::sync::{OwnedRwLockReadGuard, RwLock};
 
-static REQUEST_GATE: Lazy<Arc<RwLock<()>>> = Lazy::new(|| Arc::new(RwLock::new(())));
-static LAST_ACTIVITY: Lazy<Mutex<Instant>> = Lazy::new(|| Mutex::new(Instant::now()));
+static REQUEST_GATE: LazyLock<Arc<RwLock<()>>> = LazyLock::new(|| Arc::new(RwLock::new(())));
+static LAST_ACTIVITY: LazyLock<Mutex<Instant>> = LazyLock::new(|| Mutex::new(Instant::now()));
 static INTENT_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
