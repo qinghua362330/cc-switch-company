@@ -28,54 +28,59 @@ afterEach(() => {
 });
 
 describe("useSettingsForm Hook", () => {
-  it.each([
-    [false, false],
-    [false, true],
-    [true, false],
-    [true, true],
-  ])(
-    "preserves explicit automatic switching %s with login preservation %s on load and reset",
-    (enabled, preserveLogin) => {
+  it.each([false, true])(
+    "preserves explicit upstream protection %s on load and reset",
+    (enabled) => {
       const data = {
         showInTray: true,
         minimizeToTrayOnClose: true,
-        codexQuotaAutoFallback: enabled,
-        preserveCodexOfficialAuthOnSwitch: preserveLogin,
-        unifyCodexSessionHistory: !preserveLogin,
+        codexQuotaProtection: {
+          enabled,
+          fiveHourThreshold: 95,
+          weeklyThreshold: 98,
+        },
       };
       useSettingsQueryMock.mockReturnValue({ data, isLoading: false });
       const { result } = renderHook(() => useSettingsForm());
-      expect(result.current.settings?.codexQuotaAutoFallback).toBe(enabled);
-      expect(result.current.settings?.preserveCodexOfficialAuthOnSwitch).toBe(
-        preserveLogin,
-      );
-      expect(result.current.settings?.unifyCodexSessionHistory).toBe(
-        !preserveLogin,
+      expect(result.current.settings?.codexQuotaProtection?.enabled).toBe(
+        enabled,
       );
       act(() =>
         result.current.updateSettings({
-          codexQuotaAutoFallback: !enabled,
-          preserveCodexOfficialAuthOnSwitch: !preserveLogin,
-          unifyCodexSessionHistory: preserveLogin,
+          codexQuotaProtection: {
+            ...data.codexQuotaProtection,
+            enabled: !enabled,
+          },
         }),
       );
-      expect(result.current.settings?.codexQuotaAutoFallback).toBe(!enabled);
-      expect(result.current.settings?.preserveCodexOfficialAuthOnSwitch).toBe(
-        !preserveLogin,
-      );
-      expect(result.current.settings?.unifyCodexSessionHistory).toBe(
-        preserveLogin,
+      expect(result.current.settings?.codexQuotaProtection?.enabled).toBe(
+        !enabled,
       );
       act(() => result.current.resetSettings(data));
-      expect(result.current.settings?.codexQuotaAutoFallback).toBe(enabled);
-      expect(result.current.settings?.preserveCodexOfficialAuthOnSwitch).toBe(
-        preserveLogin,
-      );
-      expect(result.current.settings?.unifyCodexSessionHistory).toBe(
-        !preserveLogin,
+      expect(result.current.settings?.codexQuotaProtection?.enabled).toBe(
+        enabled,
       );
     },
   );
+  it("ignores an unsupported cached language sharing the Chinese prefix", () => {
+    useSettingsQueryMock.mockReturnValue({ data: null, isLoading: false });
+    window.localStorage.setItem("language", "zha");
+    (i18n as any).language = "en";
+    const { result } = renderHook(() => useSettingsForm());
+    expect(result.current.readPersistedLanguage()).toBe("en");
+  });
+
+  it.each([
+    ["zh-TW-u-nu-hanidec", "zh-TW"],
+    ["zh-Hant-TW", "zh-TW"],
+    ["zh-hantx", "zh"],
+    ["zh-hkx", "zh"],
+  ])("normalizes the Chinese tag %s to %s", (language, expected) => {
+    useSettingsQueryMock.mockReturnValue({ data: null, isLoading: false });
+    window.localStorage.setItem("language", language);
+    const { result } = renderHook(() => useSettingsForm());
+    expect(result.current.readPersistedLanguage()).toBe(expected);
+  });
 
   it("should normalize settings and sync language on initialization", async () => {
     useSettingsQueryMock.mockReturnValue({
@@ -100,7 +105,7 @@ describe("useSettingsForm Hook", () => {
     expect(settings.showInTray).toBe(true);
     expect(settings.minimizeToTrayOnClose).toBe(true);
     expect(settings.enableClaudePluginIntegration).toBe(false);
-    expect(settings.codexQuotaAutoFallback).toBe(true);
+    expect(settings.codexQuotaProtection?.enabled).not.toBe(true);
     expect(settings.preserveCodexOfficialAuthOnSwitch).toBe(true);
     expect(settings.unifyCodexSessionHistory).toBe(true);
     expect(settings.codexStackClassicTools).toBe(true);
@@ -111,16 +116,21 @@ describe("useSettingsForm Hook", () => {
     expect(changeLanguageSpy).toHaveBeenCalledWith("en");
   });
 
-  it("preserves Turkish from server settings", async () => {
-    useSettingsQueryMock.mockReturnValue({
-      data: { language: "tr" },
-      isLoading: false,
-    });
-    const { result } = renderHook(() => useSettingsForm());
-    await waitFor(() => expect(result.current.settings?.language).toBe("tr"));
-    expect(result.current.initialLanguage).toBe("tr");
-    expect(changeLanguageSpy).toHaveBeenCalledWith("tr");
-  });
+  it.each(["tr", "ko", "ru", "de"])(
+    "preserves %s from server settings",
+    async (language) => {
+      useSettingsQueryMock.mockReturnValue({
+        data: { language },
+        isLoading: false,
+      });
+      const { result } = renderHook(() => useSettingsForm());
+      await waitFor(() =>
+        expect(result.current.settings?.language).toBe(language),
+      );
+      expect(result.current.initialLanguage).toBe(language);
+      expect(changeLanguageSpy).toHaveBeenCalledWith(language);
+    },
+  );
 
   it("should support japanese language preference from server data", async () => {
     useSettingsQueryMock.mockReturnValue({
@@ -195,7 +205,9 @@ describe("useSettingsForm Hook", () => {
     });
 
     expect(result.current.settings?.showInTray).toBe(false);
-    expect(result.current.settings?.codexQuotaAutoFallback).toBe(true);
+    expect(result.current.settings?.codexQuotaProtection?.enabled).not.toBe(
+      true,
+    );
     expect(result.current.settings?.preserveCodexOfficialAuthOnSwitch).toBe(
       true,
     );
@@ -249,7 +261,7 @@ describe("useSettingsForm Hook", () => {
     expect(settings.showInTray).toBe(false);
     expect(settings.minimizeToTrayOnClose).toBe(false);
     expect(settings.enableClaudePluginIntegration).toBe(true);
-    expect(settings.codexQuotaAutoFallback).toBe(true);
+    expect(settings.codexQuotaProtection?.enabled).not.toBe(true);
     expect(settings.preserveCodexOfficialAuthOnSwitch).toBe(true);
     expect(settings.unifyCodexSessionHistory).toBe(true);
     expect(settings.codexStackClassicTools).toBe(true);

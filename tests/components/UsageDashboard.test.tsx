@@ -1,4 +1,4 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
@@ -7,8 +7,10 @@ import {
   UsageDashboard,
   resetUsageSyncClockForTests,
 } from "@/components/usage/UsageDashboard";
+import { USAGE_CHOICE_KEYS } from "@/components/usage/rememberedChoice";
 import type { UsageRangeSelection } from "@/types/usage";
 import { setSettings } from "../msw/state";
+import { createTestQueryClient } from "../utils/testQueryClient";
 
 const useProviderStatsMock = vi.hoisted(() => vi.fn());
 const useModelStatsMock = vi.hoisted(() => vi.fn());
@@ -149,11 +151,7 @@ vi.mock("@/lib/query/proxy", () => ({
 }));
 
 const renderDashboard = (props: ComponentProps<typeof UsageDashboard> = {}) => {
-  const queryClient = new QueryClient({
-    defaultOptions: {
-      queries: { retry: false },
-    },
-  });
+  const queryClient = createTestQueryClient();
   return render(
     <QueryClientProvider client={queryClient}>
       <UsageDashboard {...props} />
@@ -185,6 +183,11 @@ const syncButton = () =>
 
 describe("UsageDashboard", () => {
   beforeEach(() => {
+    // Storage polyfills may not expose saved entries through Object.keys.
+    // Reset between tests, but preserve choices across remounts within a test.
+    for (const key of Object.values(USAGE_CHOICE_KEYS)) {
+      window.localStorage.removeItem(key);
+    }
     resetUsageSyncClockForTests();
     useProviderStatsMock.mockReset();
     useModelStatsMock.mockReset();
@@ -389,8 +392,11 @@ describe("UsageDashboard", () => {
         pi: false,
         mcode: false,
         kimi: false,
+        dsh: false,
         agy: false,
         omp: false,
+        copilot: false,
+        workbuddy: false,
       },
     });
     renderDashboard({ initialAppType: "gemini" });
@@ -551,9 +557,7 @@ describe("UsageDashboard", () => {
   });
 
   it("does not scan until settings load, and never once they say scanning is off", async () => {
-    const client = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
+    const client = createTestQueryClient();
     const view = render(
       <QueryClientProvider client={client}>
         <UsageDashboard settingsReady={false} />

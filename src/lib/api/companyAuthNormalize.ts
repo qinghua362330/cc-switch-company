@@ -4,6 +4,7 @@ import {
   type CompanyAuthUser,
   type CompanyCatalogItem,
   type CompanyModelCapabilities,
+  type CompanyCapabilitySource,
   type CompanyCatalogRefresh,
   type CompanyFeishuLoginStart,
 } from "@/lib/api/companyAuthTypes";
@@ -80,6 +81,144 @@ const normalizeCapabilityOptions = (
       })
     : undefined;
 
+// These are identifiers, not display text or executable native instructions.
+const readMetadataIdentifier = (value: unknown): string | null => {
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  return /^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,255}$/.test(text) &&
+    redactUiString(text) === text
+    ? text
+    : null;
+};
+
+// Fixed-depth allowlist for builder provenance; no arbitrary nested payloads.
+const normalizeSourceArtifact = (value: unknown, fields: readonly string[]) => {
+  if (!isRecord(value)) return undefined;
+  const normalized: Record<string, string> = {};
+  for (const field of fields) {
+    const text = readMetadataIdentifier(value[field]);
+    if (
+      text !== null &&
+      (field !== "sha256" || /^[a-fA-F0-9]{64}$/.test(text))
+    ) {
+      normalized[field] = field === "sha256" ? text.toLowerCase() : text;
+    }
+  }
+  return Object.keys(normalized).length ? normalized : undefined;
+};
+
+const normalizeCapabilitySource = (value: unknown) => {
+  if (!isRecord(value)) return undefined;
+  const normalized: {
+    -readonly [K in keyof CompanyCapabilitySource]: CompanyCapabilitySource[K];
+  } = {};
+  const schemaVersion = value.schema_version ?? value.schemaVersion;
+  if (
+    typeof schemaVersion === "number" &&
+    Number.isSafeInteger(schemaVersion) &&
+    schemaVersion > 0
+  ) {
+    normalized.schema_version = schemaVersion;
+  }
+  for (const [snake, camel] of [
+    ["version", "version"],
+    ["codex_version", "codexVersion"],
+    ["model_slug", "modelSlug"],
+    ["digest", "digest"],
+    ["fingerprint", "fingerprint"],
+  ] as const) {
+    const text = readMetadataIdentifier(value[snake] ?? value[camel]);
+    if (text !== null) normalized[snake] = text;
+  }
+  if (isRecord(value.fields)) {
+    const fields: Record<string, string> = {};
+    for (const field of [
+      "context_window",
+      "max_context_window",
+      "input_modalities",
+      "max_input_tokens",
+      "max_output_tokens",
+      "supported_reasoning_levels",
+      "default_reasoning_level",
+      "additional_speed_tiers",
+      "service_tiers",
+      "default_service_tier",
+      "catalog_snapshot",
+    ]) {
+      const source = readMetadataIdentifier(value.fields[field]);
+      if (source !== null) fields[field] = source;
+    }
+    if (Object.keys(fields).length) normalized.fields = fields;
+  }
+  const bundled = normalizeSourceArtifact(value.codex_bundled, [
+    "kind",
+    "sha256",
+    "codex_version",
+  ]);
+  if (bundled) normalized.codex_bundled = bundled;
+  const modelsDev = normalizeSourceArtifact(value.models_dev, [
+    "kind",
+    "sha256",
+    "provider",
+    "model_id",
+  ]);
+  if (modelsDev) normalized.models_dev = modelsDev;
+  return Object.keys(normalized).length ? normalized : undefined;
+};
+
+// A deterministic, non-security change detector until every server supplies a
+// digest. Sort object keys so transport ordering cannot trigger a false refresh.
+// Only the fingerprint crosses into React, never native prompt/tool contents.
+const snapshotFingerprint = (value: Record<string, unknown>): string => {
+  const canonicalize = (item: unknown): unknown => {
+    if (Array.isArray(item)) return item.map(canonicalize);
+    if (!isRecord(item)) return item;
+    return Object.fromEntries(
+      Object.keys(item)
+        .sort()
+        .map((key) => [key, canonicalize(item[key])]),
+    );
+  };
+  const serialized = JSON.stringify(canonicalize(value));
+  let hash = 0xcbf29ce484222325n;
+  for (let i = 0; i < serialized.length; i++) {
+    hash = BigInt.asUintN(
+      64,
+      (hash ^ BigInt(serialized.charCodeAt(i))) * 0x100000001b3n,
+    );
+  }
+  return `fnv1a64:${hash.toString(16).padStart(16, "0")}`;
+};
+
+const normalizeCatalogSnapshot = (value: unknown) => {
+  if (!isRecord(value)) return undefined;
+  const schemaVersion = value.schema_version ?? value.schemaVersion;
+  const codexVersion = readMetadataIdentifier(
+    value.codex_version ?? value.codexVersion,
+  );
+  const modelSlug = readMetadataIdentifier(
+    isRecord(value.model)
+      ? value.model.slug
+      : (value.model_slug ?? value.modelSlug),
+  );
+  if (schemaVersion !== 1 || !codexVersion || !modelSlug) return undefined;
+  const digest = readMetadataIdentifier(value.digest);
+  const source = normalizeSourceArtifact(value.source, ["kind", "sha256"]);
+  return {
+    schema_version: 1 as const,
+    codex_version: codexVersion,
+    model_slug: modelSlug,
+    ...(digest ? { digest } : {}),
+    ...(source ? { source } : {}),
+    // Canonicalize aliases as well as object ordering before fingerprinting.
+    fingerprint: snapshotFingerprint({
+      schema_version: 1,
+      codex_version: codexVersion,
+      model: isRecord(value.model) ? value.model : { slug: modelSlug },
+    }),
+  };
+};
+
 const normalizeModelCapabilities = (
   value: unknown,
 ): Readonly<Record<string, CompanyModelCapabilities>> | undefined => {
@@ -97,6 +236,9 @@ const normalizeModelCapabilities = (
       ["service_tiers", "serviceTiers"],
       ["context_window", "contextWindow"],
       ["max_context_window", "maxContextWindow"],
+      ["max_input_tokens", "maxInputTokens"],
+      ["max_output_tokens", "maxOutputTokens"],
+      ["input_modalities", "inputModalities"],
       ["default_service_tier", "defaultServiceTier"],
     ] as const) {
       const field = raw[snake] ?? raw[camel];
@@ -111,7 +253,19 @@ const normalizeModelCapabilities = (
         if (options !== undefined) normalized[snake] = options;
       } else if (snake === "additional_speed_tiers") {
         if (Array.isArray(field)) normalized[snake] = readStringArray(field);
-      } else if (snake === "context_window" || snake === "max_context_window") {
+      } else if (snake === "input_modalities") {
+        if (Array.isArray(field)) {
+          normalized[snake] = field.flatMap((item) => {
+            const modality = readMetadataIdentifier(item);
+            return modality === null ? [] : [modality];
+          });
+        }
+      } else if (
+        snake === "context_window" ||
+        snake === "max_context_window" ||
+        snake === "max_input_tokens" ||
+        snake === "max_output_tokens"
+      ) {
         if (
           typeof field === "number" &&
           Number.isSafeInteger(field) &&
@@ -122,6 +276,14 @@ const normalizeModelCapabilities = (
         const text = readUiString(field);
         if (text !== null) normalized[snake] = text;
       }
+    }
+    const snapshot = normalizeCatalogSnapshot(
+      raw.catalog_snapshot ?? raw.catalogSnapshot,
+    );
+    if (snapshot) normalized.catalog_snapshot = snapshot;
+    for (const field of ["source", "provenance"] as const) {
+      const source = normalizeCapabilitySource(raw[field]);
+      if (source) normalized[field] = source;
     }
     // Only the declared capability fields cross into React; unknown secret fields do not.
     capabilities[redactUiString(model)] = normalized;

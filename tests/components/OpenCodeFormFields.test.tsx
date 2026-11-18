@@ -14,7 +14,6 @@ import { OpenCodeFormFields } from "@/components/providers/forms/OpenCodeFormFie
 import { Form } from "@/components/ui/form";
 import { fetchModelsForConfig } from "@/lib/api/model-fetch";
 import type { PresetModelSource } from "@/lib/modelMetadata";
-import { MODELS_DEV_API_URL } from "@/lib/modelsDev";
 import { http, HttpResponse } from "msw";
 import { toast } from "sonner";
 import { server } from "../msw/server";
@@ -108,7 +107,11 @@ describe("OpenCodeFormFields", () => {
   });
 
   it("shows each model's window and capabilities and fills picked models quietly", async () => {
-    server.use(http.get(MODELS_DEV_API_URL, () => HttpResponse.error()));
+    server.use(
+      http.post("http://tauri.local/fetch_models_dev", () =>
+        HttpResponse.error(),
+      ),
+    );
     const toastInfo = vi.spyOn(toast, "info");
     vi.mocked(fetchModelsForConfig).mockResolvedValue([
       { id: "model-a", ownedBy: null },
@@ -935,5 +938,42 @@ describe("OpenCodeFormFields", () => {
     expect(onModelsChange).toHaveBeenLastCalledWith({
       "mimo-v2.6-pro": { ...model, reasoning: false, reasoningEfforts: false },
     });
+  });
+
+  // 自定义 DSH 模型也要能填兼容性（百炼兼容模式不认 developer 角色，#9330）
+  it("offers DeepSeek Harness compatibility for models that have none yet", () => {
+    const onModelsChange = vi.fn();
+    const model = { name: "DeepSeek V4.1 Flash", reasoning: true };
+    renderOpenCodeForm({
+      modelDialect: "dsh",
+      onModelsChange,
+      models: { "deepseek-v4.1-flash": model },
+    });
+
+    expandFirstModel();
+    expect(
+      screen.getByText("pi.form.noCompatibilityOptions"),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "pi.form.addCompatibilityOption" }),
+    );
+    fireEvent.change(screen.getByPlaceholderText("supportsDeveloperRole"), {
+      target: { value: "supportsDeveloperRole" },
+    });
+    const value = screen.getByPlaceholderText("false");
+    fireEvent.change(value, { target: { value: "false" } });
+    fireEvent.keyDown(value, { key: "Enter" });
+    expect(onModelsChange).toHaveBeenLastCalledWith({
+      "deepseek-v4.1-flash": {
+        ...model,
+        compat: { supportsDeveloperRole: false },
+      },
+    });
+  });
+
+  it("keeps compatibility out of OpenCode models", () => {
+    renderOpenCodeForm();
+    expandFirstModel();
+    expect(screen.queryByText("pi.form.compatibility")).not.toBeInTheDocument();
   });
 });

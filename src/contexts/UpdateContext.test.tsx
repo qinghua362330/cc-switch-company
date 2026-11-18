@@ -10,15 +10,23 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("../lib/updater", () => ({
   checkForUpdate: mocks.checkForUpdate,
+  UPDATE_READY_EVENT: "app-update-ready",
 }));
 
 vi.mock("@/lib/userAttention", () => ({
   confirmCompanySoftwareUpdate: mocks.confirmCompanySoftwareUpdate,
 }));
 
-vi.mock("@/lib/api", () => ({
+vi.mock("@/lib/api/settings", () => ({
   settingsApi: {
     launchCcSwitchUpdateInstaller: mocks.launchInstaller,
+    getAutoUpdateStatus: vi.fn().mockResolvedValue({
+      supported: false,
+      enabled: false,
+      downloading: false,
+      ready: null,
+      routingInUse: false,
+    }),
   },
 }));
 

@@ -169,3 +169,63 @@ describe("Codex model list drag handles", () => {
     );
   });
 });
+
+describe("Codex catalog capabilities synchronization", () => {
+  it.each(["replace", "remove"])(
+    "uses the refreshed capabilities after a %s-only prop update and a row edit",
+    async (operation) => {
+      const capabilities = {
+        context_window: 200000,
+        catalog_snapshot: {
+          schema_version: 1,
+          codex_version: "0.134.0",
+          model: {
+            slug: "model-1",
+            base_instructions: "Original native prompt",
+          },
+        },
+      };
+      const row = {
+        model: "model-1",
+        displayName: "Company model",
+        capabilities,
+      };
+      const props = makeProps({ catalogModels: [row] });
+      const { rerender } = render(<Harness {...props} />);
+      expect(props.onCatalogModelsChange).not.toHaveBeenCalled();
+      const refreshed = {
+        ...row,
+        capabilities:
+          operation === "remove"
+            ? undefined
+            : {
+                ...capabilities,
+                catalog_snapshot: {
+                  ...capabilities.catalog_snapshot,
+                  model: {
+                    ...capabilities.catalog_snapshot.model,
+                    base_instructions: "Updated native prompt",
+                  },
+                },
+              },
+      };
+      rerender(<Harness {...props} catalogModels={[refreshed]} />);
+      expect(props.onCatalogModelsChange).not.toHaveBeenCalled();
+      fireEvent.change(screen.getByDisplayValue("Company model"), {
+        target: { value: "Edited company model" },
+      });
+      await waitFor(() =>
+        expect(props.onCatalogModelsChange).toHaveBeenCalledTimes(1),
+      );
+      const saved = vi.mocked(props.onCatalogModelsChange!).mock.calls[0][0];
+      expect(saved).toHaveLength(1);
+      expect(saved[0].capabilities).toEqual(refreshed.capabilities);
+      expect(saved[0].displayName).toBe("Edited company model");
+      expect(saved[0].contextWindow).toBe("");
+      expect(saved[0]).not.toHaveProperty("rowId");
+      // A parent's echo of the edit must not generate another change callback.
+      rerender(<Harness {...props} catalogModels={saved} />);
+      expect(props.onCatalogModelsChange).toHaveBeenCalledTimes(1);
+    },
+  );
+});

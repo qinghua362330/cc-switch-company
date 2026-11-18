@@ -14,15 +14,10 @@ pub struct CatalogEntry {
     pub default_model: String,
     pub models: Vec<String>,
     pub group: String,
-    /// 服务端声明的每模型能力（推理档、速度/服务档、上下文窗口），键为模型名。
-    ///
-    /// 号池能力由号池里的账号决定，而客户端本机的 `~/.codex/models_cache.json`
-    /// 反映的是【使用者个人账号】的订阅，两者并不一致：个人号是免费/Plus 时会
-    /// 少列 `max`/`ultra` 与 Fast 档，没登录过 Codex 的机器更是一条也拿不到。
-    /// 由服务端下发可以让所有人看到号池真实支持的档位，且改动无需发版。
-    ///
-    /// 旧服务端不返回该字段、旧客户端也会忽略它，双向兼容；缺省时客户端沿用
-    /// 既有推断逻辑。
+    /// 服务端每模型能力快照，键为精确模型名。客户端优先使用所选 Codex
+    /// 的 bundled 目录；本机未命中时才使用兼容版本的 native 快照或通用能力。
+    /// 自动能力不是用户显式配置，不读取个人账号的 models_cache.json。
+    /// 旧服务端可省略此字段；新快照仍保留旧客户端可读的 scalar 字段。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_capabilities: Option<std::collections::BTreeMap<String, serde_json::Value>>,
 }

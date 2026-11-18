@@ -116,4 +116,75 @@ describe("ProviderForm Codex catalog helpers", () => {
       ]),
     ).toEqual([{ model: "glm-5.2", reasoningLevels: ["high", "max"] }]);
   });
+
+  it("round-trips nested company capabilities without making fallback context explicit", () => {
+    const stored = {
+      model: "company-codex",
+      capabilities: {
+        context_window: 128000,
+        supports_parallel_tool_calls: false,
+        input_modalities: ["text", "image"],
+        future_metadata: { enabled: true, limits: [0, 42], optional: null },
+        catalog_snapshot: {
+          schema_version: 1,
+          codex_version: "0.134.0",
+          model: {
+            slug: "company-codex",
+            base_instructions: "Native instructions must survive DB edits.",
+            tools: [{ name: "shell", options: { enabled: true } }],
+          },
+        },
+      },
+    };
+
+    const loaded = mapCodexCatalogModelForForm(stored);
+    expect(loaded).toMatchObject({ capabilities: stored.capabilities });
+    expect(loaded.contextWindow).toBe("");
+
+    const [saved] = normalizeCodexCatalogModelsForSave([loaded]);
+    expect(saved).toEqual(stored);
+    expect(saved).not.toHaveProperty("contextWindow");
+    expect(saved).not.toHaveProperty("context_window");
+  });
+
+  it.each(["contextWindow", "context_window"])(
+    "keeps explicit %s separate from fallback capabilities",
+    (contextField) => {
+      const capabilities = {
+        context_window: 128000,
+        reasoning: { enabled: false },
+      };
+      const loaded = mapCodexCatalogModelForForm({
+        model: "company-codex",
+        [contextField]: "256000",
+        capabilities,
+      });
+
+      expect(loaded.contextWindow).toBe("256000");
+      expect(normalizeCodexCatalogModelsForSave([loaded])).toEqual([
+        { model: "company-codex", contextWindow: 256000, capabilities },
+      ]);
+    },
+  );
+
+  it("preserves an empty capabilities object", () => {
+    const stored = { model: "company-codex", capabilities: {} };
+    expect(
+      normalizeCodexCatalogModelsForSave([mapCodexCatalogModelForForm(stored)]),
+    ).toEqual([stored]);
+  });
+
+  it.each([undefined, null, false, 128000, "invalid", []])(
+    "does not carry malformed capabilities (%j) into form state or saved rows",
+    (capabilities) => {
+      const loaded = mapCodexCatalogModelForForm({
+        model: "company-codex",
+        capabilities,
+      });
+      expect(loaded).not.toHaveProperty("capabilities");
+      expect(normalizeCodexCatalogModelsForSave([loaded])).toEqual([
+        { model: "company-codex" },
+      ]);
+    },
+  );
 });

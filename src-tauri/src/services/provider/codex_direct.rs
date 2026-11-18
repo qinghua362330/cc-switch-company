@@ -61,7 +61,7 @@ fn app() -> &'static str {
 /// 官方卡：`category == "official"`，或按 `is_codex_official_provider` 认出来的（早期
 /// 绑定托管账号时没存 category 的卡）。
 pub(crate) fn is_official(provider: &Provider) -> bool {
-    provider.category.as_deref() == Some("official")
+    provider.has_official_category()
         || crate::proxy::providers::is_codex_official_provider(provider)
 }
 
@@ -554,7 +554,6 @@ fn row_auth(provider: &Provider) -> Value {
 
 /// 在内存里算好的一次 Codex 写入。
 pub(crate) struct Planned {
-    quota_identity: Option<String>,
     company_compaction_cleanup: CompanyCompactionCleanup,
     config: CodexConfigPatch,
     /// 第三方路由表的凭据来源：写入时按盘上有没有登录定 `requires_openai_auth`。
@@ -567,6 +566,12 @@ pub(crate) struct Planned {
     official_logins: Vec<Value>,
     /// 目录里的官方行取自哪个登录的官方列表：拿写锁后和实际的目标登录核对。
     native_identity: Option<String>,
+    /// 代理的第三方路由可以和官方路由一样写成内置 openai（不写选路，顶层 `openai_base_url`
+    /// 指向本地代理）时的代理地址。写入时盘上有登录才这样写，否则仍写 custom 表：内置 openai
+    /// 没有登录会卡在登录页。这样路由 / 聚合模式下换哪一家，新会话都记在 `openai` 组，
+    /// Codex 0.167 起不会因为 provider 不一致把另一组会话变成只读。代理负责把请求带着的
+    /// ChatGPT 身份剥掉、换上第三方的 Key。
+    openai_route: Option<String>,
     /// 代理契约（直连时也算，没有用处）。
     pub contract: Contract,
 }
@@ -714,6 +719,10 @@ pub(crate) fn plan(
 
     let official = provider.is_some_and(is_official);
     let managed_login = prepared.target_login.as_ref().map(|(_, auth)| auth.clone());
+    let mut openai_route = None;
+    // 「暂停使用官方登录」只管代理契约：直连照常。
+    let without_login = matches!(target, Target::Proxy { .. })
+        && crate::settings::codex_proxy_without_official_login();
     let (mut route, stamp, auth) = match (target, &projection) {
         (Target::Direct(None), _) | (_, None) => (RouteWrite::Default, None, AuthGoal::KeepNative),
         (Target::Direct(Some(provider)), Some(projection)) => {
@@ -758,19 +767,44 @@ pub(crate) fn plan(
                     Some(login) => AuthGoal::Managed(login.clone()),
                     None => AuthGoal::Official(row_auth(route)),
                 };
-                (
+                // 暂停使用官方登录：官方路由也写成不要求登录的 custom 表（Codex 就不按登录
+                // 账号的额度锁发送键），登录照常留在 auth.json；代理在本地拒绝官方请求，
+                // 聚合里的第三方成员照常可用。
+                let route = if without_login {
+                    RouteWrite::Custom(proxy_route_table(ROUTE_ID, base_url, false))
+                } else {
                     RouteWrite::OfficialProxy {
                         base_url: base_url.to_string(),
                         unified: crate::settings::unify_codex_session_history(),
-                    },
-                    None,
-                    auth,
-                )
+                    }
+                };
+                (route, None, auth)
             } else {
                 // The proxy owns its URL/auth, but the route still owns the remote
                 // compaction preference. Preserve the existing UI's OpenAI-name
                 // toggle and Codex's explicit override (including "unsupported").
                 let mut proxy_table = proxy_route_table(ROUTE_ID, base_url, false);
+                // 写完后盘上有登录时，改成和官方路由一样的写法（见 `Planned::openai_route`）。
+                // 行里写了内置 openai 表达不了的客户端设置时仍写 custom 表，统一会话历史开着时
+                // 本来就全在 custom 组。
+                let client_owned = match &projection.route {
+                    Route::Custom { table, .. } => {
+                        PROXY_KEPT_CLIENT_KEYS
+                            .iter()
+                            .any(|key| table.contains_key(key))
+                            || table
+                                .get("capabilities")
+                                .and_then(|capabilities| capabilities.get("remote_compaction"))
+                                .is_some()
+                    }
+                    _ => false,
+                };
+                if !client_owned
+                    && !without_login
+                    && !crate::settings::unify_codex_session_history()
+                {
+                    openai_route = Some(base_url.to_string());
+                }
                 if let Route::Custom { table, .. } = &projection.route {
                     if table.get("name").and_then(Item::as_str) == Some("OpenAI") {
                         proxy_table.insert("name", toml_edit::value("OpenAI"));
@@ -795,7 +829,8 @@ pub(crate) fn plan(
                 }
                 (
                     RouteWrite::Custom(proxy_table),
-                    Some(RouteAuth::Bearer),
+                    // 暂停使用官方登录时不按盘上的登录补 `requires_openai_auth`，恒为 false。
+                    (!without_login).then_some(RouteAuth::Bearer),
                     AuthGoal::KeepNative,
                 )
             }
@@ -875,31 +910,16 @@ pub(crate) fn plan(
         catalog.as_deref(),
         prepared,
         official_login.as_deref(),
+        openai_route.is_some(),
+        without_login,
     );
     Ok(Planned {
         company_compaction_cleanup: CompanyCompactionCleanup(
             provider.is_some_and(is_company_provider),
         ),
-        quota_identity: match target {
-            Target::Direct(provider) => provider.map(|p| p.id.clone()),
-            Target::Proxy {
-                route,
-                base_url,
-                stack,
-            } => {
-                let catalog_value = catalog
-                    .as_deref()
-                    .and_then(|bytes| serde_json::from_slice(bytes).ok());
-                crate::services::codex_quota_fallback::proxy_identity(
-                    route,
-                    base_url,
-                    stack,
-                    catalog_value.as_ref(),
-                )
-            }
-        },
         config,
         stamp,
+        openai_route,
         catalog,
         auth,
         leaving_official,
@@ -1146,6 +1166,8 @@ fn contract_of(
     catalog: Option<&[u8]>,
     prepared: &Prepared,
     official_login: Option<&str>,
+    openai_route: bool,
+    without_login: bool,
 ) -> Contract {
     let base_url = match target {
         Target::Proxy { base_url, .. } => *base_url,
@@ -1192,6 +1214,14 @@ fn contract_of(
     });
     if target_provider(target).is_some_and(is_company_provider) {
         parts["company_compaction_cleanup"] = Value::Bool(true);
+    }
+    // 第三方路由按登录写成内置 openai：和以前只写 custom 表的契约区分开，升级后接上时重写一次。
+    if openai_route {
+        parts["openai_route"] = Value::Bool(true);
+    }
+    // 暂停使用官方登录改的是不进契约的 `requires_openai_auth`：单独记一笔，开关一动就重写。
+    if without_login {
+        parts["without_login"] = Value::Bool(true);
     }
     let key = digest(Some(
         &serde_json::to_vec(&parts).expect("contract parts serialize"),
@@ -1363,6 +1393,12 @@ pub(crate) fn run_with_edits(
         }
     };
     let mut config = planned.config;
+    if let Some(base_url) = planned.openai_route.filter(|_| login) {
+        config.route = RouteWrite::OfficialProxy {
+            base_url,
+            unified: false,
+        };
+    }
     if let (Some(kind), RouteWrite::Custom(table)) = (planned.stamp, &mut config.route) {
         if matches!(kind, RouteAuth::Bearer | RouteAuth::EnvKey) {
             table.insert(
@@ -1411,16 +1447,12 @@ pub(crate) fn run_with_edits(
         .transpose()?;
     let catalog_patch = planned.catalog.map(WholeFile::Write);
     // 先应用编辑器里的全局改动（有的话），再换关键字段。
-    let quota_cleanup = crate::services::codex_quota_fallback::projection(None, true);
-    let quota_overlay =
-        crate::services::codex_quota_fallback::projection(planned.quota_identity, false);
-    let mut config_steps: Vec<&dyn TomlDocPatch> = vec![&quota_cleanup];
+    let mut config_steps: Vec<&dyn TomlDocPatch> = Vec::new();
     if let Some(edits) = edits {
         config_steps.push(edits);
     }
     config_steps.push(&planned.company_compaction_cleanup);
     config_steps.push(&config);
-    config_steps.push(&quota_overlay);
     let config_patch = TomlSteps(config_steps);
 
     let mut changes: Vec<FileChange<'_>> = Vec::new();
@@ -1455,9 +1487,6 @@ pub(crate) fn run_with_edits(
     }
 
     let report = write.run(op, &changes, pending);
-    if report.is_ok() {
-        crate::services::codex_quota_fallback::projection_committed();
-    }
     // 按磁盘上的实际内容记新启动的 Codex 会读到的目录：失败时可能已经发布了一部分。
     super::codex_client_catalog::observe(store);
     report

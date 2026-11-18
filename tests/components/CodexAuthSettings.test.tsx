@@ -140,112 +140,122 @@ const defaults: SettingsFormState = {
   minimizeToTrayOnClose: true,
 };
 
-describe("CodexAuthSettings quota fallback", () => {
+describe("CodexAuthSettings quota and unified session history", () => {
+  const UNIFY = "settings.unifyCodexSessionHistory";
+
   beforeEach(() => {
     getCompressionMock.mockResolvedValue(false);
     diskUsageMock.mockResolvedValue(0);
   });
 
-  const renderQuotaSettings = async (
-    settings: SettingsFormState,
-    onChange: ReturnType<typeof vi.fn>,
-  ) => {
+  it("does not offer the removed login fallback and enables protection by default", async () => {
+    const onChange = vi.fn().mockResolvedValue(true);
     await act(async () => {
-      render(<CodexAuthSettings settings={settings} onChange={onChange} />);
+      render(<CodexAuthSettings settings={defaults} onChange={onChange} />);
     });
-  };
-
-  it("defaults quota, login preservation and unified history on", async () => {
-    const onChange = vi.fn();
-    await renderQuotaSettings(defaults, onChange);
-    const toggle = screen.getByRole("switch", {
-      name: "settings.codexQuotaAutoFallback",
+    expect(
+      screen.queryByRole("switch", {
+        name: "settings.codexQuotaAutoFallback",
+      }),
+    ).not.toBeInTheDocument();
+    const protection = screen.getByRole("switch", {
+      name: "settings.codexQuotaProtection.title",
     });
-    expect(toggle).toHaveAttribute("aria-checked", "true");
-    expect(
-      screen.getByRole("switch", {
-        name: "settings.preserveCodexOfficialAuthOnSwitch",
-      }),
-    ).toHaveAttribute("aria-checked", "true");
-    expect(
-      screen.getByRole("switch", {
-        name: "settings.unifyCodexSessionHistory",
-      }),
-    ).toHaveAttribute("aria-checked", "true");
-    fireEvent.click(toggle);
-    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(protection).toHaveAttribute("aria-checked", "true");
+    await act(async () => fireEvent.click(protection));
     expect(onChange).toHaveBeenCalledWith({
-      codexQuotaAutoFallback: false,
+      codexQuotaProtection: {
+        enabled: false,
+        fiveHourThreshold: 95,
+        weeklyThreshold: 95,
+      },
     });
   });
 
-  it("preserves an explicit opt-out even when login preservation is on", async () => {
+  it("keeps login preservation and unified history independent", async () => {
     const onChange = vi.fn();
-    await renderQuotaSettings(
-      {
-        ...defaults,
-        preserveCodexOfficialAuthOnSwitch: true,
-        codexQuotaAutoFallback: false,
-      },
-      onChange,
-    );
-    expect(
-      screen.getByRole("switch", { name: "settings.codexQuotaAutoFallback" }),
-    ).toHaveAttribute("aria-checked", "false");
-    expect(onChange).not.toHaveBeenCalled();
-  });
-
-  it("retains fallback when login preservation is off and allows turning it off", async () => {
-    const onChange = vi.fn();
-    await renderQuotaSettings(
-      {
-        ...defaults,
-        preserveCodexOfficialAuthOnSwitch: false,
-        unifyCodexSessionHistory: false,
-        codexQuotaAutoFallback: true,
-      },
-      onChange,
-    );
-    const toggle = screen.getByRole("switch", {
-      name: "settings.codexQuotaAutoFallback",
+    await act(async () => {
+      render(<CodexAuthSettings settings={defaults} onChange={onChange} />);
     });
-    expect(toggle).toHaveAttribute("aria-checked", "true");
-    expect(
-      screen.getByRole("switch", {
-        name: "settings.preserveCodexOfficialAuthOnSwitch",
-      }),
-    ).toHaveAttribute("aria-checked", "false");
-    expect(
-      screen.getByRole("switch", {
-        name: "settings.unifyCodexSessionHistory",
-      }),
-    ).toHaveAttribute("aria-checked", "false");
-    expect(onChange).not.toHaveBeenCalled();
-    fireEvent.click(toggle);
-    expect(onChange).toHaveBeenCalledTimes(1);
-    expect(onChange).toHaveBeenCalledWith({
-      codexQuotaAutoFallback: false,
-    });
-  });
-
-  it("does not alter fallback when changing login preservation", async () => {
-    const onChange = vi.fn();
-    await renderQuotaSettings(
-      {
-        ...defaults,
-        preserveCodexOfficialAuthOnSwitch: true,
-        codexQuotaAutoFallback: true,
-      },
-      onChange,
-    );
     fireEvent.click(
       screen.getByRole("switch", {
         name: "settings.preserveCodexOfficialAuthOnSwitch",
       }),
     );
-    expect(onChange).toHaveBeenCalledTimes(1);
     expect(onChange).toHaveBeenCalledWith({
       preserveCodexOfficialAuthOnSwitch: false,
     });
+  });
+  async function renderUnify(enabled: boolean, migrateExisting?: boolean) {
+    const onChange = vi.fn().mockResolvedValue(true);
+    await act(async () => {
+      render(
+        <CodexAuthSettings
+          settings={
+            {
+              unifyCodexSessionHistory: enabled,
+              unifyCodexMigrateExisting: migrateExisting,
+            } as SettingsFormState
+          }
+          onChange={onChange}
+        />,
+      );
+    });
+    return onChange;
+  }
+
+  // 新版 Codex 会锁住留在官方组的会话：迁入仍由用户决定，但默认勾上
+  it("offers migrating existing sessions, checked by default", async () => {
+    const onChange = await renderUnify(false);
+
+    fireEvent.click(screen.getByRole("switch", { name: UNIFY }));
+    const checkbox = await screen.findByRole("checkbox");
+    expect(
+      screen.getByText("confirm.unifyCodexHistory.migrateExisting"),
+    ).toBeInTheDocument();
+    expect(checkbox).toBeChecked();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "confirm.unifyCodexHistory.confirm" }),
+    );
+    expect(onChange).toHaveBeenCalledWith({
+      unifyCodexSessionHistory: true,
+      unifyCodexMigrateExisting: true,
+    });
+  });
+
+  it("lets the user enable without migrating", async () => {
+    const onChange = await renderUnify(false);
+
+    fireEvent.click(screen.getByRole("switch", { name: UNIFY }));
+    fireEvent.click(await screen.findByRole("checkbox"));
+    fireEvent.click(
+      screen.getByRole("button", { name: "confirm.unifyCodexHistory.confirm" }),
+    );
+    expect(onChange).toHaveBeenCalledWith({
+      unifyCodexSessionHistory: true,
+      unifyCodexMigrateExisting: false,
+    });
+  });
+
+  it("offers restore when turning off after opting into migration", async () => {
+    await renderUnify(true, true);
+
+    fireEvent.click(screen.getByRole("switch", { name: UNIFY }));
+    expect(
+      await screen.findByText("confirm.unifyCodexHistoryOff.restoreBackup"),
+    ).toBeInTheDocument();
+  });
+
+  it("has nothing to restore when migration was never opted into", async () => {
+    await renderUnify(true, false);
+
+    fireEvent.click(screen.getByRole("switch", { name: UNIFY }));
+    expect(
+      await screen.findByText("confirm.unifyCodexHistoryOff.message"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("confirm.unifyCodexHistoryOff.restoreBackup"),
+    ).not.toBeInTheDocument();
   });
 });
