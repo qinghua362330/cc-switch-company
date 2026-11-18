@@ -453,7 +453,14 @@ pub fn maybe_migrate_codex_official_history_to_unified_bucket(
         &config_text,
         OFFICIAL_OPENAI_CODEX_MODEL_PROVIDER_ID,
     ) {
-        Some(0) => {
+        // Before the first company migration, legacy official and third-party
+        // buckets may exist even when there are no openai rows. Normalize those
+        // once before allowing upstream's fast no-op path on subsequent checks.
+        Some(0)
+            if crate::settings::is_codex_official_history_unify_migrated_for_dir(
+                &codex_dir_key,
+            ) =>
+        {
             return Ok(CodexHistoryProviderBucketMigrationOutcome {
                 skipped_reason: Some("nothing_to_migrate".to_string()),
                 ..Default::default()
@@ -3576,7 +3583,7 @@ model_provider = "aihubmix"
                     .unwrap()
                     .skipped_reason
                     .as_deref(),
-                Some("already_migrated")
+                Some("nothing_to_migrate")
             );
             for (path, bytes) in files.iter().zip(&migrated) {
                 assert_eq!(fs::read(path).unwrap(), *bytes);
@@ -3700,7 +3707,7 @@ model_provider = "aihubmix"
                 .unwrap()
                 .skipped_reason
                 .as_deref(),
-            Some("already_migrated")
+            Some("nothing_to_migrate")
         );
         let mut settings = crate::settings::get_settings();
         settings.unify_codex_session_history = false;
@@ -3790,7 +3797,7 @@ model_provider = "aihubmix"
                 .unwrap()
                 .skipped_reason
                 .as_deref(),
-            Some("already_migrated")
+            Some("nothing_to_migrate")
         );
     }
 
@@ -3819,6 +3826,11 @@ model_provider = "aihubmix"
             seed_threads(&dir.join(CODEX_STATE_DB_FILENAME), &[("shared", bucket)]);
         }
         maybe_migrate_codex_official_history_to_unified_bucket().unwrap();
+        assert!(
+            crate::settings::is_codex_official_history_unify_migrated_for_dir(
+                &canonical_dir_string(&first)
+            )
+        );
         let mut settings = crate::settings::get_settings();
         settings.codex_config_dir = Some(second.to_string_lossy().to_string());
         crate::settings::update_settings(settings).unwrap();

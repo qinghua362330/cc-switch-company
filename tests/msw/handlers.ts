@@ -1,5 +1,6 @@
 import { http, HttpResponse } from "msw";
 import type { AppId } from "@/lib/api/types";
+import { APP_IDS } from "@/config/appSpecs";
 import type { Provider, Settings } from "@/types";
 import { companyAuthHandlers } from "./companyAuthHandlers";
 import {
@@ -56,19 +57,7 @@ const withJson = async <T = JsonRecord>(request: Request): Promise<T> => {
 };
 
 const isAppId = (value: unknown): value is AppId =>
-  typeof value === "string" &&
-  [
-    "claude",
-    "claude-desktop",
-    "codex",
-    "mcode",
-    "grokbuild",
-    "gemini",
-    "opencode",
-    "openclaw",
-    "hermes",
-    "pi",
-  ].some((appId) => appId === value);
+  typeof value === "string" && APP_IDS.some((appId) => appId === value);
 
 const isProviderInput = (value: unknown): value is ProviderInput =>
   isJsonRecord(value) &&
@@ -101,6 +90,18 @@ const success = (payload: unknown): Response =>
 export const handlers = [
   http.post(`${TAURI_ENDPOINT}/check_cc_switch_update_manifest`, () =>
     success({ version: "0.0.0" }),
+  ),
+  http.post(`${TAURI_ENDPOINT}/get_auto_update_status`, () =>
+    success({
+      supported: false,
+      enabled: false,
+      downloading: false,
+      ready: null,
+      routingInUse: false,
+    }),
+  ),
+  http.post(`${TAURI_ENDPOINT}/launch_cc_switch_update_installer`, () =>
+    success(true),
   ),
   http.post(`${TAURI_ENDPOINT}/fetch_models_dev`, () =>
     success(JSON.stringify({})),

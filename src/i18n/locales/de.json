@@ -276,7 +276,8 @@
     "formSubtitleStack": "{{app}} (Aggregationsmodus)",
     "editCurrentNoticeFile": "Dies ist der verwendete Anbieter. Beim Speichern wird er sofort geschrieben nach",
     "editCurrentNoticeFileEnd": "; die nächste Anfrage verwendet ihn.",
-    "editCurrentNotice": "Dies ist der verwendete Anbieter. Das Speichern wirkt sofort; die nächste Anfrage verwendet die neuen Einstellungen."
+    "editCurrentNotice": "Dies ist der verwendete Anbieter. Das Speichern wirkt sofort; die nächste Anfrage verwendet die neuen Einstellungen.",
+    "codexAppOpenFailed": "Die Codex-App konnte nicht neu gestartet werden"
   },
   "claudeCode": {
     "needsRouting": "Routing erforderlich"
@@ -388,7 +389,8 @@
       "thirdPartyBucket": "Drittanbietern",
       "migrationFinished": "{{count}} alte Sitzungen migriert. Starten Sie Codex neu, um sie fortzusetzen.",
       "migrationFailed": "Alte Sitzungen konnten nicht migriert werden: {{error}}. CC Switch versucht es beim nächsten Start erneut."
-    }
+    },
+    "codexSwitchedAndLaunched": "Anbieter gewechselt und Codex neu gestartet"
   },
   "confirm": {
     "deleteProvider": "Anbieter löschen",
@@ -1183,7 +1185,10 @@
         "invalidResponse": "Der Dienst hat ungültige Daten zurückgegeben",
         "unavailable": "Der Dienst konnte keine Daten liefern"
       }
-    }
+    },
+    "codexLoginModeRefreshWaiting": "Vor dem Aktualisieren des Codex-Hintergrunddienstes wird auf das Ende des aktuellen Durchlaufs gewartet.",
+    "codexLoginModeRefreshReloaded": "Der bisherige Codex-Hintergrunddienst wurde beendet; die Konfiguration ist bereit. Das Senden wurde nicht überprüft.",
+    "codexLoginModeRefreshManual": "Der Hintergrunddienst kann nicht sicher automatisch aktualisiert werden. Bitte starten Sie Codex manuell neu."
   },
   "apps": {
     "claude": "Claude",

@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   },
   checkForUpdate: vi.fn(),
   downloadAppUpdate: vi.fn(),
+  confirmCompanySoftwareUpdate: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -34,6 +35,10 @@ vi.mock("@/lib/updater", async (importOriginal) => ({
   checkForUpdate: mocks.checkForUpdate,
 }));
 
+vi.mock("@/lib/userAttention", () => ({
+  confirmCompanySoftwareUpdate: mocks.confirmCompanySoftwareUpdate,
+}));
+
 let ctx: ReturnType<typeof useUpdate>;
 function Probe() {
   ctx = useUpdate();
@@ -53,6 +58,7 @@ describe("UpdateProvider auto update", () => {
     mocks.checkForUpdate.mockReset();
     mocks.downloadAppUpdate.mockReset();
     mocks.downloadAppUpdate.mockResolvedValue(null);
+    mocks.confirmCompanySoftwareUpdate.mockReset().mockResolvedValue(false);
   });
 
   afterEach(() => {

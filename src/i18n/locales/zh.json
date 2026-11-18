@@ -276,7 +276,8 @@
     "formSubtitleStack": "{{app}}（聚合模式）",
     "editCurrentNoticeFile": "这是正在使用的供应商。保存后会立即写进",
     "editCurrentNoticeFileEnd": "，下一次请求生效。",
-    "editCurrentNotice": "这是正在使用的供应商。保存后立即生效，下一次请求就用新的设置。"
+    "editCurrentNotice": "这是正在使用的供应商。保存后立即生效，下一次请求就用新的设置。",
+    "codexAppOpenFailed": "重启 Codex 应用失败"
   },
   "claudeCode": {
     "needsRouting": "需要路由"
@@ -388,7 +389,8 @@
       "thirdPartyBucket": "第三方供应商",
       "migrationFinished": "已迁入 {{count}} 个旧会话，重启 Codex 后即可继续",
       "migrationFailed": "迁入旧会话失败：{{error}}。下次启动 CC Switch 会自动重试"
-    }
+    },
+    "codexSwitchedAndLaunched": "已切换并重启 Codex"
   },
   "confirm": {
     "deleteProvider": "删除供应商",

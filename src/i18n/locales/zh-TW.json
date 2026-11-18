@@ -81,11 +81,7 @@
     "disableAutoModeServerHelp": "閘道不支援伺服器端檢查，auto mode 每個工作階段會先停下提示一次「不符合條件」，按 Enter 後改用本機檢查。勾選後直接用本機檢查，不再提示。官方端點不要勾選。",
     "keyFieldsHint": "位址、Key、模型、上下文視窗和相容開關隨供應商切換；其餘欄位是 Claude Code 全域設定，儲存後對所有供應商生效。",
     "inactiveFieldsHint": "這些是舊版存進卡裡的設定，現在切換不會寫出去。點一下加入上方，儲存後對所有供應商生效。",
-    "addToGlobalSettings": "加入全域設定",
-    "writeCommonConfig": "寫入通用設定",
-    "editCommonConfig": "編輯通用設定",
-    "editCommonConfigTitle": "編輯通用設定片段",
-    "commonConfigHint": "該片段會在勾選「寫入通用設定」時合併到 settings.json 中"
+    "addToGlobalSettings": "加入全域設定"
   },
   "header": {
     "viewOnGithub": "在 GitHub 上檢視",
@@ -281,8 +277,7 @@
     "editCurrentNoticeFile": "這是正在使用的供應商。儲存後會立即寫進",
     "editCurrentNoticeFileEnd": "，下一次請求生效。",
     "editCurrentNotice": "這是正在使用的供應商。儲存後立即生效，下一次請求就用新的設定。",
-    "writeCommonConfig": "寫入通用設定",
-    "editCommonConfigButton": "編輯通用設定"
+    "codexAppOpenFailed": "重新啟動 Codex 應用程式失敗"
   },
   "claudeCode": {
     "needsRouting": "需要路由"
@@ -394,7 +389,8 @@
       "thirdPartyBucket": "第三方供應商",
       "migrationFinished": "已遷入 {{count}} 個舊會話，重新啟動 Codex 後即可繼續",
       "migrationFailed": "遷入舊會話失敗：{{error}}。下次啟動 CC Switch 會自動重試"
-    }
+    },
+    "codexSwitchedAndLaunched": "已切換並重新啟動 Codex"
   },
   "confirm": {
     "deleteProvider": "刪除供應商",
@@ -433,11 +429,6 @@
       "title": "開啟自動同步",
       "message": "開啟自動同步後，每次資料庫變更都會自動上傳至 WebDAV 伺服器。\n\n這可能會產生較高的網路流量消耗，請確保您的網路環境和 WebDAV 服務支援頻繁的資料傳輸。",
       "confirm": "我已了解，繼續開啟"
-    },
-    "commonConfig": {
-      "title": "關於通用設定",
-      "message": "「通用設定片段」可以在不同供應商之間共用外掛程式、環境變數等設定，避免切換供應商時遺失這些設定。\n\n使用方法：\n① 編輯供應商時點擊「編輯通用設定」→「從編輯內容擷取」\n② 新增供應商時勾選「寫入通用設定」（預設已勾選）\n\n如果您新安裝了外掛程式或 Hook，請重新擷取一次通用設定。",
-      "confirm": "我了解了"
     }
   },
   "settings": {
@@ -2249,13 +2240,7 @@
     "inactiveFieldCopied": "已複製",
     "upstreamFormatCopilotRouteHint": "所有模式都需要開啟路由，由路由注入 Copilot 帳號憑證；手動指定的協定模型不支援時會報錯。",
     "maxOutputTokensWarning": "不要超過模型或閘道的真實輸出上限，否則會回傳 400。",
-    "routeOnlySettingsHint": "以下兩項只在路由、聚合模式下生效。",
-    "writeCommonConfig": "寫入通用設定",
-    "editCommonConfig": "編輯通用設定",
-    "editCommonConfigTitle": "編輯 Codex 通用設定片段",
-    "commonConfigHint": "該片段會在勾選「寫入通用設定」時附加到 config.toml 末尾",
-    "enableGoalMode": "啟用 Goal mode",
-    "noCommonConfigToApply": "通用設定片段為空或沒有可寫入的內容"
+    "routeOnlySettingsHint": "以下兩項只在路由、聚合模式下生效。"
   },
   "geminiConfig": {
     "envFile": "環境變數 (.env)",
@@ -2264,22 +2249,7 @@
     "configJsonHint": "使用 JSON 格式設定 Gemini 擴充參數（選填）",
     "keyFieldsHint": "位址、Key、模型名稱和認證方式隨供應商切換；其餘環境變數和 settings.json 是 Gemini CLI 全域設定，儲存後對所有供應商生效。",
     "inactiveFieldsHint": "這些是舊版存進卡裡的設定，現在切換不會寫出去。點一下加入上方，儲存後對所有供應商生效。",
-    "addToGlobalSettings": "加入全域設定",
-    "writeCommonConfig": "寫入通用設定",
-    "editCommonConfig": "編輯通用設定",
-    "editCommonConfigTitle": "編輯 Gemini 通用設定片段",
-    "commonConfigHint": "該片段會寫入 Gemini 的 .env（不允許包含 GOOGLE_GEMINI_BASE_URL、GEMINI_API_KEY）",
-    "extractFromCurrent": "從編輯內容擷取",
-    "extractNoCommonConfig": "目前編輯內容沒有可擷取的通用設定",
-    "extractFailed": "擷取失敗：{{error}}",
-    "saveFailed": "儲存失敗：{{error}}",
-    "extractedConfigInvalid": "擷取的設定格式錯誤",
-    "invalidJsonFormat": "通用設定片段格式錯誤（必須是有效的 JSON）",
-    "commonConfigInvalidKeys": "通用設定片段不能包含 GOOGLE_GEMINI_BASE_URL 或 GEMINI_API_KEY（發現：{{keys}}）",
-    "commonConfigInvalidValues": "通用設定片段的值必須是字串",
-    "noCommonConfigToApply": "通用設定片段為空或沒有可寫入的內容",
-    "configMergeFailed": "設定合併失敗：{{error}}",
-    "configReplaceFailed": "設定替換失敗：{{error}}"
+    "addToGlobalSettings": "加入全域設定"
   },
   "opencode": {
     "npmPackage": "API 格式",
@@ -5199,15 +5169,6 @@
       "title": "登入時自動開啟瀏覽器",
       "description": "關掉後只複製登入連結，由你自己選瀏覽器開啟，適合用獨立的瀏覽器環境管理多個帳號。"
     }
-  },
-  "commonConfig": {
-    "guideTitle": "什麼是通用設定片段？",
-    "guidePurpose": "用來在不同供應商之間共用外掛程式、環境變數等非敏感設定。切換供應商時不會遺失這些設定。",
-    "guideUsage": "用法：① 點擊「從編輯內容擷取」儲存通用部分 ② 新增供應商時勾選「寫入通用設定」",
-    "guideReExtract": "如果您新安裝了外掛程式或 Hook，請重新擷取一次通用設定，以便同步至其他供應商。",
-    "guideReassurance": "請放心：您的原始設定已儲存在預設供應商中，不會遺失。",
-    "emptyTitle": "尚未建立通用設定片段",
-    "emptyHint": "點擊下方「從編輯內容擷取」按鈕，從目前設定中擷取可重複使用的部分"
   },
   "kimi": {
     "oauth": {

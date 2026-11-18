@@ -204,7 +204,10 @@ fn switch_provider_internal(
                 if let Some(reason) = outcome.skipped_reason {
                     if !matches!(
                         reason.as_str(),
-                        "already_migrated" | "unify_toggle_off" | "stock_migration_not_requested"
+                        "already_migrated"
+                            | "nothing_to_migrate"
+                            | "unify_toggle_off"
+                            | "stock_migration_not_requested"
                     ) {
                         let warning = format!("codex_history_migration_pending: Codex 历史统一检查已延期（{reason}）；停止 Codex 后，下次切换供应商或启动 CC Switch 时重试");
                         log::warn!("{warning}");

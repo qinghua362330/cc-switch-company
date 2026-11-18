@@ -276,7 +276,8 @@
     "formSubtitleStack": "{{app}} (Aggregation mode)",
     "editCurrentNoticeFile": "This is the provider in use. Saving writes it to",
     "editCurrentNoticeFileEnd": " right away; the next request uses it.",
-    "editCurrentNotice": "This is the provider in use. Saving takes effect right away; the next request uses the new settings."
+    "editCurrentNotice": "This is the provider in use. Saving takes effect right away; the next request uses the new settings.",
+    "codexAppOpenFailed": "Failed to restart the Codex app"
   },
   "claudeCode": {
     "needsRouting": "Needs Routing"
@@ -388,7 +389,8 @@
       "thirdPartyBucket": "third-party providers",
       "migrationFinished": "Migrated {{count}} old sessions. Restart Codex to continue them.",
       "migrationFailed": "Failed to migrate old sessions: {{error}}. CC Switch will retry on next launch."
-    }
+    },
+    "codexSwitchedAndLaunched": "Switched provider and restarted Codex"
   },
   "confirm": {
     "deleteProvider": "Delete Provider",

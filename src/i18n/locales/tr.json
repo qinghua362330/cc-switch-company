@@ -276,7 +276,8 @@
     "formSubtitleStack": "{{app}} (Birleştirme modu)",
     "editCurrentNoticeFile": "Bu, kullanımda olan sağlayıcıdır. Kaydetme şunu yazar:",
     "editCurrentNoticeFileEnd": "hemen; sonraki istek bunu kullanır.",
-    "editCurrentNotice": "Bu, kullanımda olan sağlayıcıdır. Kaydetme hemen etkili olur; sonraki istek yeni ayarları kullanır."
+    "editCurrentNotice": "Bu, kullanımda olan sağlayıcıdır. Kaydetme hemen etkili olur; sonraki istek yeni ayarları kullanır.",
+    "codexAppOpenFailed": "Codex uygulaması yeniden başlatılamadı"
   },
   "claudeCode": {
     "needsRouting": "Yönlendirme Gerekiyor"
@@ -388,7 +389,8 @@
       "thirdPartyBucket": "üçüncü taraf sağlayıcılar",
       "migrationFinished": "{{count}} eski oturum taşındı. Devam etmek için Codex'i yeniden başlatın.",
       "migrationFailed": "Eski oturumlar taşınamadı: {{error}}. CC Switch bir sonraki açılışta yeniden deneyecek."
-    }
+    },
+    "codexSwitchedAndLaunched": "Sağlayıcı değiştirildi ve Codex yeniden başlatıldı"
   },
   "confirm": {
     "deleteProvider": "Sağlayıcıyı Sil",
@@ -1183,7 +1185,10 @@
         "invalidResponse": "Hizmet geçersiz veri döndürdü",
         "unavailable": "Hizmet veri sağlayamadı"
       }
-    }
+    },
+    "codexLoginModeRefreshWaiting": "Codex arka plan hizmetini yenilemeden önce mevcut turun tamamlanması bekleniyor.",
+    "codexLoginModeRefreshReloaded": "Eski Codex arka plan hizmeti kapandı; yapılandırma hazır. Gönderim doğrulanmadı.",
+    "codexLoginModeRefreshManual": "Arka plan hizmeti otomatik olarak güvenle yenilenemiyor. Lütfen Codex’i elle yeniden başlatın."
   },
   "apps": {
     "claude": "Claude",

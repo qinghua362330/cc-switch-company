@@ -578,8 +578,12 @@ wire_api = "responses"
     assert_eq!(requires_openai_auth(), Some(true));
     assert!(cc_switch_lib::get_codex_auth_path().exists());
 
-    cc_switch_lib::update_settings(cc_switch_lib::AppSettings::default())
-        .expect("turn login preservation off");
+    cc_switch_lib::update_settings(cc_switch_lib::AppSettings {
+        preserve_codex_official_auth_on_switch: false,
+        unify_codex_session_history: false,
+        ..Default::default()
+    })
+    .expect("turn login preservation off");
     let reapplied = cc_switch_lib::reapply_current_codex_third_party_live(&state)
         .expect("reapply the current third-party provider");
 

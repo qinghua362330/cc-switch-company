@@ -4236,6 +4236,7 @@ model_provider = "c"
     async fn codex_entering_the_proxy_gives_back_a_stashed_login() {
         let _home = Home::new();
         set_preservation(false);
+        set_unified_history(false);
         seed_codex("", Some(&chatgpt_login("acct")));
         let [a, b] = codex_a_b();
         let official = codex_official();
@@ -4323,6 +4324,7 @@ model_provider = "c"
     #[serial]
     async fn codex_paused_official_login_writes_a_login_free_custom_table() {
         let _home = Home::new();
+        set_unified_history(false);
         let set_paused = |paused: bool| {
             let mut settings = crate::settings::get_settings();
             settings.preserve_codex_official_auth_on_switch = true;

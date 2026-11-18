@@ -308,7 +308,9 @@ describe("WorkBuddyProviderForm", () => {
       />,
     );
     expect(document.querySelector("#workbuddy-api-format")).toBeNull();
-    expect(screen.getByLabelText("API Key")).toHaveValue(["local", "test", "key"].join("-"));
+    expect(screen.getByLabelText("API Key")).toHaveValue(
+      ["local", "test", "key"].join("-"),
+    );
     expect(screen.getByText("workbuddy.form.apiKeyHint")).toBeInTheDocument();
     expect(screen.getByLabelText("workbuddy.form.url")).toHaveAttribute(
       "aria-required",

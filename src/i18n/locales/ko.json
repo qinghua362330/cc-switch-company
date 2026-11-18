@@ -276,7 +276,8 @@
     "editCurrentNoticeFileEnd": "에 즉시 저장되며, 다음 요청부터 적용됩니다.",
     "editCurrentNotice": "사용 중인 공급자입니다. 저장하면 즉시 적용되며, 다음 요청부터 새 설정을 사용합니다.",
     "liveConfigReadFailed": "{{app}} 설정 파일을 읽을 수 없습니다",
-    "liveConfigReadFailedHint": "설정 파일의 문제를 해결하기 전까지는 공급자를 추가하거나 제거할 수 없습니다."
+    "liveConfigReadFailedHint": "설정 파일의 문제를 해결하기 전까지는 공급자를 추가하거나 제거할 수 없습니다.",
+    "codexAppOpenFailed": "Codex 앱을 다시 시작하지 못했습니다"
   },
   "claudeCode": {
     "needsRouting": "라우팅 필요"
@@ -388,7 +389,8 @@
       "thirdPartyBucket": "타사 공급자",
       "migrationFinished": "이전 세션 {{count}}개를 옮겼습니다. Codex를 다시 시작하면 이어갈 수 있습니다.",
       "migrationFailed": "이전 세션을 옮기지 못했습니다: {{error}}. 다음에 CC Switch를 실행하면 자동으로 다시 시도합니다."
-    }
+    },
+    "codexSwitchedAndLaunched": "공급자를 전환하고 Codex를 다시 시작했습니다"
   },
   "confirm": {
     "deleteProvider": "공급자 삭제",
@@ -1183,7 +1185,10 @@
         "invalidResponse": "서비스가 잘못된 데이터를 반환했습니다",
         "unavailable": "서비스에서 데이터를 제공할 수 없습니다"
       }
-    }
+    },
+    "codexLoginModeRefreshWaiting": "현재 턴이 끝나면 Codex 백그라운드 서비스를 새로 고칩니다.",
+    "codexLoginModeRefreshReloaded": "기존 Codex 백그라운드 서비스가 종료되었으며 구성이 준비되었습니다. 전송은 확인되지 않았습니다.",
+    "codexLoginModeRefreshManual": "백그라운드 서비스를 안전하게 자동 새로 고침할 수 없습니다. Codex를 수동으로 다시 시작하세요."
   },
   "apps": {
     "claude": "Claude",
